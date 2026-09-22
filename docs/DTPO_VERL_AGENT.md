@@ -94,6 +94,15 @@ python -m pip install -r requirements.txt
 其中 `vllm==0.11.0` 会解析与其匹配的 PyTorch 依赖。建议使用干净的 Conda
 环境，避免服务器预装的 PyTorch/CUDA Python 包造成版本冲突。
 
+项目通过 `adaptive_vision_rl.verl_agent_hooks` 回移了 vLLM 0.11.2 对
+Qwen3-VL 多模态模块前缀的修复。该 hook 只在检测到 `vllm==0.11.0` 且原始
+错误映射仍存在时生效，使 rank 64、alpha 128 的 LoRA 只挂载到语言模型，
+避免视觉塔在 vLLM profiling 阶段错误进入 LoRA 路径。启动日志中应出现：
+
+```text
+Applied the vLLM 0.11.2 Qwen3-VL LoRA mapping backport
+```
+
 ### 4. 单独安装 FlashAttention
 
 ```bash
