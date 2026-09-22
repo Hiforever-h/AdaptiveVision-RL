@@ -194,6 +194,17 @@ Smoke test 需要重点确认：
 bash scripts/run_dtpo_lora.sh
 ```
 
+默认每 250 个训练 step 保存一次可恢复训练的 checkpoint，并只保留最近 1 个：
+
+```yaml
+trainer:
+  save_freq: 250
+  max_actor_ckpt_to_keep: 1
+```
+
+最后一个训练 step 无论能否被 250 整除都会保存。输出目录由
+`trainer.default_local_dir` 控制。
+
 默认 WandB project 为 `adaptive_vision_rl`，run name 为
 `qwen3vl_4b_dtpo_lora`。可在启动时覆盖，例如：
 
