@@ -1,0 +1,13 @@
+{
+  "source": "/Users/hiforever/Documents/AiProject/AdaptiveVision-RL/data/visionthink_3000_300_500_balanced/val",
+  "source_count": 300,
+  "sample_count": 20,
+  "sample_seed": 20260922,
+  "localized": 18,
+  "valid": 20,
+  "answer_match": 14,
+  "use_tool_true": 13,
+  "global": 1,
+  "uncertain": 1,
+  "selection": "uniform random sample without replacement from the full manifest"
+}

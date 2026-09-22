@@ -1,0 +1,20 @@
+{"sample_id":"smart-train-00334","answer_correct":true,"localization_verdict":"useful_context_region","note":"框包含最高营业额公司的名称、条形和数值。"}
+{"sample_id":"smart-train-02287","answer_correct":true,"localization_verdict":"useful_context_region","note":"框包含 2018 年标签、对应条形和 3,419 数值。"}
+{"sample_id":"smart-train-04015","answer_correct":true,"localization_verdict":"useful_context_region","note":"框覆盖 2020 年附近的年份标签、折线和 203.77 数值。"}
+{"sample_id":"smart-train-04159","answer_correct":true,"localization_verdict":"useful_context_region","note":"框同时包含 30–49、65+ 的行标签、蓝色条和值，可计算平均数。"}
+{"sample_id":"smart-train-04838","answer_correct":true,"localization_verdict":"useful_context_region","note":"框覆盖峰值 2016、相邻年份、数值和年份标签。"}
+{"sample_id":"smart-train-06316","answer_correct":true,"localization_verdict":"useful_context_region","note":"框包含 United Arab Emirates 标签、最高条形和 31% 数值。"}
+{"sample_id":"smart-train-06679","answer_correct":true,"localization_verdict":"useful_context_region","note":"框覆盖 2000 年起的连续下降区间以及年份和值。"}
+{"sample_id":"smart-train-09154","answer_correct":true,"localization_verdict":"global_appropriate","note":"图中没有鸟，使用全局视图判断 0 比局部裁剪更合理。"}
+{"sample_id":"smart-train-13512","answer_correct":true,"localization_verdict":"useful_context_region","note":"框包含表头以及 247–249 行，248 与 Macquarie University 对应清楚。"}
+{"sample_id":"smart-train-21801","answer_correct":true,"localization_verdict":"useful_context_region","note":"框包含 Becoming 封面、书名与 Michelle Obama。"}
+{"sample_id":"smart-train-24802","answer_correct":false,"localization_verdict":"misses_target_detail","note":"框只覆盖一条鱼，无法支持计算每条鱼平均眼睛数量；教师答案 1 也与标准答案 2 不符。"}
+{"sample_id":"smart-train-27400","answer_correct":true,"localization_verdict":"uncertain_appropriate","note":"图中是风筝且没有瓶子，返回 uncertain 和空框是可接受的保守标注。"}
+{"sample_id":"smart-train-31231","answer_correct":true,"localization_verdict":"incomplete_context","note":"框包含条件概率表，但截掉了 P(X=2)=0.3 和 P(X=3)=0.5，不能仅靠高清框完成全期望计算。"}
+{"sample_id":"smart-train-31346","answer_correct":true,"localization_verdict":"incomplete_context","note":"框只覆盖目标数据行，没有保留 To par、Margin of victory、Runner-up 等列标题。"}
+{"sample_id":"smart-train-31768","answer_correct":true,"localization_verdict":"useful_context_region","note":"框准确放大封面底部难辨认的作者 Janey Levy。"}
+{"sample_id":"smart-train-31984","answer_correct":true,"localization_verdict":"useful_context_region","note":"框包含封面底部说明和作者 Ardi Lawrence。"}
+{"sample_id":"smart-train-32041","answer_correct":true,"localization_verdict":"useful_context_region","note":"框包含 Hungary、Spain 两行的橙色条和值 70。"}
+{"sample_id":"smart-train-32370","answer_correct":true,"localization_verdict":"useful_context_region","note":"框保留表头、z=0.70 行及 l_voi=71.72。"}
+{"sample_id":"smart-train-32746","answer_correct":false,"localization_verdict":"misses_target_detail","note":"框只覆盖 2012–2018，漏掉标准答案对应的 2001 区域；教师回答 2017 错误。"}
+{"sample_id":"smart-train-34045","answer_correct":true,"localization_verdict":"useful_context_region","note":"框包含 Website 标签和完整网址 www.augustana.edu。"}

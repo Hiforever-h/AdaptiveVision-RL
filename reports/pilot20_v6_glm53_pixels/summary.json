@@ -1,0 +1,36 @@
+{
+  "run_name": "pilot20_v6_glm53_pixels",
+  "sample_count": 20,
+  "valid_annotations": 20,
+  "localized": 20,
+  "answers_matched": 6,
+  "region_reward_eligible": 20,
+  "visually_reviewed": 20,
+  "answers_correct_after_review": 20,
+  "localization_incomplete_context": 2,
+  "localization_useful_context_region": 15,
+  "localization_whole_image": 1,
+  "localization_partial_target": 1,
+  "localization_misses_target_detail": 1,
+  "providers": [
+    "zai"
+  ],
+  "returned_models": [
+    "glm-5.3-flash"
+  ],
+  "prompt_sha256": [
+    "5acb56398705d3350427fdf84211cd63403566afe71024ba61e27bfffea5f580"
+  ],
+  "usage_reported_by_api": {
+    "prompt_tokens": 19912,
+    "completion_tokens": 7827,
+    "total_tokens": 27739,
+    "prompt_cache_hit_tokens": 0,
+    "prompt_cache_miss_tokens": 0
+  },
+  "mean_latest_cached_request_seconds": 9.69145,
+  "median_box_area_fraction": 0.13078638358841527,
+  "selection_criterion": "answer correctness (exact match or recorded Codex visual review); no crop-only verification",
+  "localization_quality": "Codex image inspection, not human ground truth; separate from answer-only acceptance",
+  "split_status": "pilot only; train 3000/dev 300 from Smart-Train, test 500 from Smart-Val not yet constructed"
+}
