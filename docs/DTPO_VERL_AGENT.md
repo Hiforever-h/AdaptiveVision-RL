@@ -28,9 +28,9 @@ python -m unittest discover -s tests -v
 
 ## 已实现的训练语义
 
-- 第一轮输入低分辨率全图和问题，策略必须在两种完整格式中二选一：
-  `<think>...</think><answer>...</answer>`，或
-  `<think>...</think><tool_call>...</tool_call>`。`think` 标签及其非空内容为必需项。
+- 第一轮输入低分辨率全图和问题，策略在直接输出 `<answer>...</answer>` 与
+  输出 `<tool_call>...</tool_call>` 请求高清局部图之间二选一。两种动作前都可以
+  可选地添加一个非空 `<think>...</think>`，但它不是合法动作的必需项。
 - 裁剪工具接收 Qwen-VL 原生的 0～1000 归一化 `xyxy` 坐标；环境按低清图
   尺寸换算后映射到原图执行裁剪，参考框与 Coverage+IoU 仍使用 0～1 坐标。
 - 合法裁剪请求会产生第二轮模型输出，第二轮不得再次调用工具。
@@ -40,8 +40,12 @@ python -m unittest discover -s tests -v
   - 唯一获取的视觉 token 数为 `low + crop`；
   - 两轮轨迹实际处理的视觉 token 数为 `low + (low + crop)`。
   两种口径都会记录。
-- Outcome Reward 为答案正确性、0.5 格式奖励和论文形式的 balance reward 之和。
-  Balance penalty 从论文的 0.1 降为 0.01，阈值保持 0.2。
+- Outcome Reward 为答案正确性、最高 0.5 的格式奖励和论文形式的 balance reward
+  之和。每个合法 action 的归一化格式分为 0.5，若它还包含非空且非占位符的
+  `<think>...</think>`，格式分提升到 1.0；直接回答的格式奖励为该分数乘 0.5，
+  两轮工具轨迹则先平均 tool call 与最终 answer 的格式分再乘 0.5。因此 `<think>`
+  仍是可选项，但在所有有效 turn 中提供真实内容才能取得满额格式奖励。Balance
+  penalty 从论文的 0.1 降为 0.01，阈值保持 0.2。
 - PPO 使用论文的非对称裁剪范围：下界 0.20、上界 0.24；学习率为
   `1e-6`，不使用 KL，工具优势系数为 0.3。
 - Tool Reward 对所有候选参考框取

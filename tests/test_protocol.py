@@ -12,6 +12,7 @@ class ProtocolTests(unittest.TestCase):
         )
         self.assertTrue(action.valid)
         self.assertEqual(action.kind, "answer")
+        self.assertTrue(action.has_think)
         self.assertEqual(action.answer, "659")
 
     def test_valid_tool_call(self):
@@ -23,6 +24,7 @@ class ProtocolTests(unittest.TestCase):
         )
         self.assertTrue(action.valid)
         self.assertEqual(action.kind, "tool")
+        self.assertTrue(action.has_think)
         self.assertEqual(action.bbox, (40.0, 60.0, 200.0, 225.0))
 
     def test_qwen_tool_call_uses_normalized_coordinates(self):
@@ -36,25 +38,41 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(action.kind, "tool")
         self.assertEqual(action.bbox, (241.56, 14.22, 275.0, 18.54))
 
-    def test_think_block_is_required_for_both_actions(self):
-        self.assertFalse(
-            parse_action(
-                "<answer>42</answer>",
-                allow_tool=True,
-                image_size=(400, 300),
-            ).valid
+    def test_think_block_is_optional_but_must_be_nonempty_when_present(self):
+        direct = parse_action(
+            "<answer>42</answer>",
+            allow_tool=True,
+            image_size=(400, 300),
         )
-        self.assertFalse(
-            parse_action(
-                '<tool_call>{"name":"request_local_region",'
-                '"arguments":{"bbox_2d":[100,200,500,750]}}</tool_call>',
-                allow_tool=True,
-                image_size=(400, 300),
-            ).valid
+        self.assertTrue(direct.valid)
+        self.assertFalse(direct.has_think)
+        self.assertEqual(direct.answer, "42")
+        tool = parse_action(
+            '<tool_call>{"name":"request_local_region",'
+            '"arguments":{"bbox_2d":[100,200,500,750]}}</tool_call>',
+            allow_tool=True,
+            image_size=(400, 300),
         )
+        self.assertTrue(tool.valid)
+        self.assertEqual(tool.kind, "tool")
+        self.assertFalse(tool.has_think)
         self.assertFalse(
             parse_action(
                 "<think></think><answer>42</answer>",
+                allow_tool=True,
+                image_size=(400, 300),
+            ).valid
+        )
+        self.assertFalse(
+            parse_action(
+                "<think>...</think><answer>42</answer>",
+                allow_tool=True,
+                image_size=(400, 300),
+            ).valid
+        )
+        self.assertFalse(
+            parse_action(
+                "<think>……</think><answer>42</answer>",
                 allow_tool=True,
                 image_size=(400, 300),
             ).valid

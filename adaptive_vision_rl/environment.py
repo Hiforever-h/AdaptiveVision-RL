@@ -12,7 +12,7 @@ from PIL import Image
 from scripts.dataset_pilot.common import answer_check, pixel_box
 from scripts.dataset_pilot.reward import geometry_reward
 
-from .protocol import extract_answer_candidate, parse_action
+from .protocol import ParsedAction, extract_answer_candidate, parse_action
 
 
 INITIAL_PROMPT = """<image>
@@ -21,31 +21,16 @@ You are given a low-resolution version of an image and a question.
 Question: {question}
 Low-resolution image size: width={width}, height={height}.
 
-You must choose exactly one of the following two actions. Include a non-empty
-<think>...</think> block, and do not output any text outside the two required tags.
-
-Action 1 — answer directly:
-<think>...</think>
-<answer>...</answer>
-
-Action 2 — request one high-resolution crop:
-<think>...</think>
+Output exactly one action, with no text outside its tag:
+1. Answer directly with <answer>...</answer>; or
+2. Request one high-resolution crop with:
 <tool_call>{{"name":"request_local_region","arguments":{{"bbox_2d":[x1,y1,x2,y2]}}}}</tool_call>
 
 The bounding box uses xyxy coordinates normalized to the integer range 0 to 1000,
 independent of the displayed image size. The origin is the top-left corner. The right
 and bottom coordinates are exclusive. You may call the tool at most once. Do not output
-an answer in the same turn as a tool call.
-
-Format example for Action 1 (the example content is unrelated to the current question):
-<think>The requested information is clearly visible in the low-resolution image.</think>
-<answer>red</answer>
-
-Format example for Action 2 (the example content is unrelated to the current question):
-<think>The requested detail is too small to read, so I need a high-resolution crop.</think>
-<tool_call>{{"name":"request_local_region","arguments":{{"bbox_2d":[120,180,760,820]}}}}</tool_call>
-
-Now respond to the current question using exactly one of the two formats above.
+an answer in the same turn as a tool call. You may optionally place one non-empty
+reasoning block enclosed by <think> and </think> immediately before the action tag.
 """
 
 
@@ -57,17 +42,9 @@ This is the requested high-resolution crop.
 
 Question: {question}
 
-Use both images. You must include a non-empty <think>...</think> block and output the
-final answer in exactly this format, with no text outside the two tags:
-<think>...</think>
-<answer>...</answer>
-
-Format example (the example content is unrelated to the current question):
-<think>The high-resolution crop makes the requested information readable.</think>
-<answer>red</answer>
-
-You cannot call the tool again. Now answer the current question using the required
-format.
+Use both images. Output the final response as <answer>...</answer>, with no text outside
+the tag. You may optionally place one non-empty reasoning block enclosed by <think>
+and </think> immediately before the answer. You cannot call another tool.
 """
 
 
@@ -192,13 +169,22 @@ class AdaptiveVisionEnvironmentManager:
         return {"text": texts, "image": images, "anchor": anchors}, infos
 
     @staticmethod
+    def _action_format_score(action: ParsedAction, expected_kind: str) -> float:
+        """Score a valid action structure and add a bonus for real reasoning."""
+
+        if not action.valid or action.kind != expected_kind:
+            return 0.0
+        return 1.0 if action.has_think else 0.5
+
+    @staticmethod
     def _score_answer(
         answer: str | None,
         references: list[str],
-        format_valid: bool,
+        action_format_scores: list[float],
     ) -> tuple[float, float]:
         accuracy = float(answer is not None and answer_check(answer, references)["match"])
-        return accuracy, 0.5 if format_valid else 0.0
+        mean_format_score = sum(action_format_scores) / len(action_format_scores)
+        return accuracy, 0.5 * mean_format_score
 
     @staticmethod
     def _inactive_prompt(images: list[np.ndarray]) -> str:
@@ -264,9 +250,11 @@ class AdaptiveVisionEnvironmentManager:
                 if action.valid and action.kind == "tool" and action.bbox is not None:
                     crop, executed, geometry = self._execute_crop(state, action.bbox)
                     tool_reward = float(geometry["reward"]) if geometry is not None else 0.0
+                    tool_format_score = self._action_format_score(action, "tool")
                     crop_tokens = self._vision_tokens(crop)
                     rewards[index] = tool_reward
                     state["stage"] = "answer_after_tool"
+                    state["tool_format_score"] = tool_format_score
                     state["last_images"] = [state["low_image"], crop]
                     next_texts.append(
                         SECOND_PROMPT.format(question=state["question"])
@@ -288,6 +276,7 @@ class AdaptiveVisionEnvironmentManager:
                             "is_action_valid": True,
                             "tool_calling": 1,
                             "won": 0.0,
+                            "action_format_score": tool_format_score,
                             "predicted_box": executed,
                             "coverage": geometry["coverage"] if geometry else None,
                             "iou": geometry["iou"] if geometry else None,
@@ -300,7 +289,7 @@ class AdaptiveVisionEnvironmentManager:
                 accuracy, format_reward = self._score_answer(
                     candidate,
                     state["answers"],
-                    action.valid and action.kind == "answer",
+                    [self._action_format_score(action, "answer")],
                 )
                 rewards[index] = accuracy + format_reward
                 state["done"] = True
@@ -328,7 +317,10 @@ class AdaptiveVisionEnvironmentManager:
             accuracy, format_reward = self._score_answer(
                 candidate,
                 state["answers"],
-                action.valid and action.kind == "answer",
+                [
+                    float(state.get("tool_format_score", 0.0)),
+                    self._action_format_score(action, "answer"),
+                ],
             )
             rewards[index] = accuracy + format_reward
             state["done"] = True

@@ -55,10 +55,9 @@ class EnvironmentTests(unittest.TestCase):
 
     def test_direct_answer_is_one_turn_without_tool_reward(self):
         observations, _ = self.environment.reset([self.row])
-        self.assertIn("You must choose exactly one", observations["text"][0])
-        self.assertIn("<think>...</think>", observations["text"][0])
-        self.assertIn("Format example for Action 1", observations["text"][0])
-        self.assertIn("Format example for Action 2", observations["text"][0])
+        self.assertIn("Output exactly one action", observations["text"][0])
+        self.assertIn("optionally place one non-empty", observations["text"][0])
+        self.assertNotIn("Example", observations["text"][0])
         observations, rewards, dones, infos = self.environment.step(
             ["<think>The answer is visible.</think><answer>42</answer>"]
         )
@@ -67,6 +66,13 @@ class EnvironmentTests(unittest.TestCase):
         self.assertEqual(infos[0]["tool_calling"], 0)
         self.assertEqual(observations["text"][0].count("<image>"), 1)
         self.assertEqual(len(observations["image"][0]), 1)
+
+    def test_direct_answer_without_think_receives_half_format_credit(self):
+        self.environment.reset([self.row])
+        _, rewards, dones, infos = self.environment.step(["<answer>42</answer>"])
+        self.assertTrue(dones[0])
+        self.assertEqual(float(rewards[0]), 1.25)
+        self.assertEqual(infos[0]["format_reward"], 0.25)
 
     def test_tool_reward_is_on_first_turn_and_second_turn_sees_two_images(self):
         observations, _ = self.environment.reset([self.row])
@@ -94,6 +100,21 @@ class EnvironmentTests(unittest.TestCase):
         self.assertEqual(observations["text"][0].count("<image>"), 2)
         self.assertEqual(len(observations["image"][0]), 2)
 
+    def test_tool_trajectory_averages_format_over_both_turns(self):
+        self.environment.reset([self.row])
+        call_without_think = (
+            '<tool_call>{"name":"request_local_region",'
+            '"arguments":{"bbox_2d":[0,0,500,500]}}</tool_call>'
+        )
+        _, _, dones, _ = self.environment.step([call_without_think])
+        self.assertFalse(dones[0])
+        _, rewards, dones, infos = self.environment.step(
+            ["<think>The crop confirms it.</think><answer>42</answer>"]
+        )
+        self.assertTrue(dones[0])
+        self.assertEqual(float(rewards[0]), 1.375)
+        self.assertEqual(infos[0]["format_reward"], 0.375)
+
     def test_mixed_batch_keeps_only_active_tool_images(self):
         direct = dict(self.row, sample_id="direct")
         tool = dict(self.row, sample_id="tool")
@@ -104,7 +125,7 @@ class EnvironmentTests(unittest.TestCase):
         )
 
         observations, _, dones, _ = self.environment.step(
-            ["<think>It is visible.</think><answer>42</answer>", call]
+            ["<answer>42</answer>", call]
         )
 
         self.assertTrue(dones[0])

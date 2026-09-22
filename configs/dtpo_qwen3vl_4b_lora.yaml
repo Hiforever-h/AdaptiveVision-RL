@@ -10,7 +10,7 @@ data:
   return_raw_chat: true
   image_key: images
   apply_chat_template_kwargs:
-    enable_thinking: true
+    enable_thinking: false
 
 actor_rollout_ref:
   model:
