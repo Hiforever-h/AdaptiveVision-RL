@@ -282,7 +282,7 @@ class AdaptiveVisionEnvironmentManager:
                 rewards[index] = accuracy + format_reward
                 state["done"] = True
                 dones[index] = True
-                next_texts.append("")
+                next_texts.append(self._inactive_prompt(state["last_images"]))
                 next_images.append(state["last_images"])
                 next_anchors.append({"stage": "inactive", "sample_id": state["sample_id"]})
                 infos.append(
@@ -310,7 +310,7 @@ class AdaptiveVisionEnvironmentManager:
             rewards[index] = accuracy + format_reward
             state["done"] = True
             dones[index] = True
-            next_texts.append("")
+            next_texts.append(self._inactive_prompt(state["last_images"]))
             next_images.append(state["last_images"])
             next_anchors.append({"stage": "inactive", "sample_id": state["sample_id"]})
             infos.append(

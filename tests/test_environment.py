@@ -55,12 +55,14 @@ class EnvironmentTests(unittest.TestCase):
 
     def test_direct_answer_is_one_turn_without_tool_reward(self):
         self.environment.reset([self.row])
-        _, rewards, dones, infos = self.environment.step(
+        observations, rewards, dones, infos = self.environment.step(
             ["<think>The answer is visible.</think><answer>42</answer>"]
         )
         self.assertTrue(dones[0])
         self.assertEqual(float(rewards[0]), 1.5)
         self.assertEqual(infos[0]["tool_calling"], 0)
+        self.assertEqual(observations["text"][0].count("<image>"), 1)
+        self.assertEqual(len(observations["image"][0]), 1)
 
     def test_tool_reward_is_on_first_turn_and_second_turn_sees_two_images(self):
         observations, _ = self.environment.reset([self.row])
@@ -79,12 +81,34 @@ class EnvironmentTests(unittest.TestCase):
             observations["anchor"][0]["vision_tokens_step_processed"], 8
         )
 
-        _, rewards, dones, infos = self.environment.step(
+        observations, rewards, dones, infos = self.environment.step(
             ["<think>The crop confirms it.</think><answer>42</answer>"]
         )
         self.assertTrue(dones[0])
         self.assertEqual(float(rewards[0]), 1.5)
         self.assertEqual(infos[0]["tool_calling"], 0)
+        self.assertEqual(observations["text"][0].count("<image>"), 2)
+        self.assertEqual(len(observations["image"][0]), 2)
+
+    def test_mixed_batch_keeps_only_active_tool_images(self):
+        direct = dict(self.row, sample_id="direct")
+        tool = dict(self.row, sample_id="tool")
+        self.environment.reset([direct, tool])
+        call = (
+            '<tool_call>{"name":"request_local_region",'
+            '"arguments":{"bbox_2d":[0,0,500,500]}}</tool_call>'
+        )
+
+        observations, _, dones, _ = self.environment.step(
+            ["<answer>42</answer>", call]
+        )
+
+        self.assertTrue(dones[0])
+        self.assertFalse(dones[1])
+        self.assertEqual(observations["text"][0].count("<image>"), 1)
+        self.assertEqual(len(observations["image"][0]), 1)
+        self.assertEqual(observations["text"][1].count("<image>"), 2)
+        self.assertEqual(len(observations["image"][1]), 2)
 
 
 if __name__ == "__main__":
