@@ -67,7 +67,7 @@ class EnvironmentTests(unittest.TestCase):
         self.assertEqual(len(observations["image"][0]), 1)
         call = (
             '<think>I need detail.</think><tool_call>{"name":"request_local_region",'
-            '"arguments":{"bbox_2d":[0,0,1,1]}}</tool_call>'
+            '"arguments":{"bbox_2d":[0,0,500,500]}}</tool_call>'
         )
         observations, rewards, dones, infos = self.environment.step([call])
         self.assertFalse(dones[0])

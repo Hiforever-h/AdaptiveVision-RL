@@ -9,11 +9,13 @@ from typing import Literal
 
 
 _DIRECT_RE = re.compile(
-    r"^\s*<think>(?P<think>.*?)</think>\s*<answer>(?P<answer>.*?)</answer>\s*$",
+    r"^\s*(?:<think>(?P<think>.*?)</think>\s*)?"
+    r"<answer>(?P<answer>.*?)</answer>\s*$",
     re.DOTALL,
 )
 _TOOL_RE = re.compile(
-    r"^\s*<think>(?P<think>.*?)</think>\s*<tool_call>(?P<call>.*?)</tool_call>\s*$",
+    r"^\s*(?:<think>(?P<think>.*?)</think>\s*)?"
+    r"<tool_call>(?P<call>.*?)</tool_call>\s*$",
     re.DOTALL,
 )
 _ANSWER_ANYWHERE_RE = re.compile(r"<answer>(?P<answer>.*?)</answer>", re.DOTALL)
@@ -61,9 +63,10 @@ def extract_answer_candidate(text: str) -> str | None:
 def parse_action(text: str, *, allow_tool: bool, image_size: tuple[int, int]) -> ParsedAction:
     """Parse a complete model turn.
 
-    Tool coordinates are absolute ``xyxy`` coordinates on the displayed low-resolution
-    full image. Right and bottom are exclusive. Extra text outside the required tags is
-    rejected so the format reward has an unambiguous definition.
+    Tool coordinates use Qwen-VL's native 0--1000 normalized ``xyxy`` space and
+    are converted to the displayed low-resolution image here. Right and bottom
+    are exclusive. A ``think`` block is optional, but extra text outside the
+    action tags is rejected so the format reward has an unambiguous definition.
     """
 
     if not isinstance(text, str):
@@ -71,7 +74,7 @@ def parse_action(text: str, *, allow_tool: bool, image_size: tuple[int, int]) ->
 
     direct = _DIRECT_RE.fullmatch(text)
     if direct:
-        if not _nonempty(direct.group("think")):
+        if direct.group("think") is not None and not _nonempty(direct.group("think")):
             return ParsedAction("invalid", False, error="empty think block")
         answer = _unwrap_boxed(direct.group("answer"))
         if not answer:
@@ -83,7 +86,7 @@ def parse_action(text: str, *, allow_tool: bool, image_size: tuple[int, int]) ->
         return ParsedAction("invalid", False, error="response does not match answer or tool schema")
     if not allow_tool:
         return ParsedAction("invalid", False, error="a second tool call is not allowed")
-    if not _nonempty(tool.group("think")):
+    if tool.group("think") is not None and not _nonempty(tool.group("think")):
         return ParsedAction("invalid", False, error="empty think block")
 
     try:
@@ -103,7 +106,13 @@ def parse_action(text: str, *, allow_tool: bool, image_size: tuple[int, int]) ->
         return ParsedAction("invalid", False, error="bbox coordinates must be numeric")
 
     x1, y1, x2, y2 = (float(value) for value in bbox)
+    if not (0 <= x1 < x2 <= 1000 and 0 <= y1 < y2 <= 1000):
+        return ParsedAction("invalid", False, error="bbox is outside the 0-1000 coordinate space")
     width, height = image_size
-    if not (0 <= x1 < x2 <= width and 0 <= y1 < y2 <= height):
-        return ParsedAction("invalid", False, error="bbox is outside the low-resolution image")
-    return ParsedAction("tool", True, bbox=(x1, y1, x2, y2))
+    image_bbox = (
+        x1 * width / 1000.0,
+        y1 * height / 1000.0,
+        x2 * width / 1000.0,
+        y2 * height / 1000.0,
+    )
+    return ParsedAction("tool", True, bbox=image_bbox)

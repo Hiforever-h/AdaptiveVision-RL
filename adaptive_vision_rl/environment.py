@@ -21,14 +21,16 @@ You are given a low-resolution version of an image and a question.
 Question: {question}
 Low-resolution image size: width={width}, height={height}.
 
-First reason inside <think>...</think>. Then choose exactly one action:
+Output exactly one action, with no text outside its tag:
 1. Answer directly with <answer>...</answer>; or
 2. Request one high-resolution crop with:
 <tool_call>{{"name":"request_local_region","arguments":{{"bbox_2d":[x1,y1,x2,y2]}}}}</tool_call>
 
-The bounding box uses absolute xyxy pixel coordinates on the displayed low-resolution
-image. The right and bottom coordinates are exclusive. You may call the tool at most
-once. Do not output an answer in the same turn as a tool call.
+The bounding box uses xyxy coordinates normalized to the integer range 0 to 1000,
+independent of the displayed image size. The origin is the top-left corner. The right
+and bottom coordinates are exclusive. You may call the tool at most once. Do not output
+an answer in the same turn as a tool call. An optional <think>...</think> block may
+precede the single action tag.
 """
 
 
@@ -36,12 +38,13 @@ SECOND_PROMPT = """<image>
 This is the same low-resolution full image.
 
 <image>
-This is the requested high-resolution crop from low-resolution bbox {bbox}.
+This is the requested high-resolution crop.
 
 Question: {question}
 
-Use both images. Reason inside <think>...</think>, then give the final response inside
-<answer>...</answer>. You cannot call another tool.
+Use both images. Output the final response as <answer>...</answer>, with no text outside
+the tag. An optional <think>...</think> block may precede it. You cannot call another
+tool.
 """
 
 
@@ -243,7 +246,7 @@ class AdaptiveVisionEnvironmentManager:
                     state["stage"] = "answer_after_tool"
                     state["last_images"] = [state["low_image"], crop]
                     next_texts.append(
-                        SECOND_PROMPT.format(question=state["question"], bbox=list(action.bbox))
+                        SECOND_PROMPT.format(question=state["question"])
                     )
                     next_images.append(state["last_images"])
                     next_anchors.append(
