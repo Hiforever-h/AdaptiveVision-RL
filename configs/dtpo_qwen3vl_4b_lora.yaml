@@ -104,7 +104,9 @@ trainer:
   total_epochs: 3
   total_training_steps: null
   balance_batch: true
-  logger: [console]
+  # verl-agent initializes both backends in the driver process. tqdm displays
+  # elapsed/remaining time locally; ETA metrics are also sent to WandB.
+  logger: [console, wandb]
   project_name: adaptive_vision_rl
   experiment_name: qwen3vl_4b_dtpo_lora
   val_before_train: true

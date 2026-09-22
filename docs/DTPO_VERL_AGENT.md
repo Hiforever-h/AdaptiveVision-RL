@@ -110,6 +110,24 @@ python -m pip install flash-attn==2.7.4.post1 \
 python -m pip install -e third_party/verl-agent --no-deps
 ```
 
+### 6. 登录 WandB
+
+默认配置同时启用终端日志和 WandB。首次使用时执行：
+
+```bash
+wandb login
+```
+
+也可以通过环境变量提供密钥，并把本地日志放到数据盘：
+
+```bash
+export WANDB_API_KEY=<your-key>
+export WANDB_DIR=/root/autodl-tmp/wandb
+```
+
+密钥不要写入 YAML 或提交到 Git。无网络时可使用
+`export WANDB_MODE=offline`，训练结束后再运行 `wandb sync`。
+
 项目不会修改 verl-agent checkout。自定义逻辑仅覆盖：
 
 - 两轮视觉环境和多图 collector；
@@ -175,6 +193,28 @@ Smoke test 需要重点确认：
 ```bash
 bash scripts/run_dtpo_lora.sh
 ```
+
+默认 WandB project 为 `adaptive_vision_rl`，run name 为
+`qwen3vl_4b_dtpo_lora`。可在启动时覆盖，例如：
+
+```bash
+bash scripts/run_dtpo_lora.sh \
+  trainer.project_name=adaptive_vision_rl \
+  trainer.experiment_name=qwen3vl_4b_dtpo_lora_a800_run1
+```
+
+终端会显示带 elapsed、ETA 和 steps/s 的训练进度条。ETA 在完成第一个训练
+step 后出现，并使用平滑后的 step 时间持续更新；初始 validation 不计入训练进度。
+同一估计还会写入 WandB：
+
+- `progress/completion_percent`；
+- `progress/step_time_ema_seconds`；
+- `progress/steps_per_hour`；
+- `progress/eta_hours`；
+- `progress/estimated_total_hours`。
+
+验证和 checkpoint step 通常更慢，因此这些 step 结束后 ETA 会相应调整。若临时不想
+上传 WandB，可在启动命令后添加 `'trainer.logger=[console]'`。
 
 可通过 OmegaConf dot-list 参数覆盖配置，例如：
 

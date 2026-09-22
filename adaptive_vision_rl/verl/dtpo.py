@@ -11,6 +11,7 @@ import verl.utils.torch_functional as verl_F
 
 from adaptive_vision_rl.dtpo_core import loss_weights_for_minibatch
 
+from .monitoring import install_monitoring_hooks
 from .trajectory import extract_trajectory_views
 
 
@@ -195,6 +196,7 @@ def install_driver_hooks(config):
 
     import verl.trainer.ppo.ray_trainer as ray_trainer
 
+    install_monitoring_hooks(ray_trainer)
     ray_trainer.compute_advantage = partial(compute_dtpo_advantage, config=config)
     ray_trainer.adjust_batch = pad_batch_for_dtpo
     if not hasattr(ray_trainer, "_adaptive_vision_original_compute_data_metrics"):

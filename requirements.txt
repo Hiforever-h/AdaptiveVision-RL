@@ -29,6 +29,7 @@ pylatexenc
 torchdata
 wandb
 qwen-vl-utils[decord]
+tqdm>=4.66
 
 # AdaptiveVision-RL direct dependencies and CPU checks.
 pillow

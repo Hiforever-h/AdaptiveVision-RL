@@ -32,6 +32,8 @@ done
 export PYTHONPATH="${PROJECT_ROOT}:${VERL_AGENT_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 export TOKENIZERS_PARALLELISM=false
 export VLLM_USE_V1=1
+export WANDB_DIR="${WANDB_DIR:-${PROJECT_ROOT}/wandb}"
+mkdir -p "${WANDB_DIR}"
 
 cd "${PROJECT_ROOT}"
 python -m adaptive_vision_rl.verl.main_dtpo \
