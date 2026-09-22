@@ -54,7 +54,9 @@ class EnvironmentTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def test_direct_answer_is_one_turn_without_tool_reward(self):
-        self.environment.reset([self.row])
+        observations, _ = self.environment.reset([self.row])
+        self.assertIn("你必须且只能选择以下两种格式之一输出", observations["text"][0])
+        self.assertIn("<think>...</think>", observations["text"][0])
         observations, rewards, dones, infos = self.environment.step(
             ["<think>The answer is visible.</think><answer>42</answer>"]
         )
@@ -95,12 +97,12 @@ class EnvironmentTests(unittest.TestCase):
         tool = dict(self.row, sample_id="tool")
         self.environment.reset([direct, tool])
         call = (
-            '<tool_call>{"name":"request_local_region",'
+            '<think>I need detail.</think><tool_call>{"name":"request_local_region",'
             '"arguments":{"bbox_2d":[0,0,500,500]}}</tool_call>'
         )
 
         observations, _, dones, _ = self.environment.step(
-            ["<answer>42</answer>", call]
+            ["<think>It is visible.</think><answer>42</answer>", call]
         )
 
         self.assertTrue(dones[0])

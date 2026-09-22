@@ -16,36 +16,50 @@ from .protocol import extract_answer_candidate, parse_action
 
 
 INITIAL_PROMPT = """<image>
-You are given a low-resolution version of an image and a question.
+你将看到一张低分辨率图片和一个问题。
 
-Question: {question}
-Low-resolution image size: width={width}, height={height}.
+问题：{question}
+低分辨率图片尺寸：宽度={width}，高度={height}。
 
-Output exactly one action, with no text outside its tag:
-1. Answer directly with <answer>...</answer>; or
-2. Request one high-resolution crop with:
+你必须且只能选择以下两种格式之一输出，不得在标签外输出任何文字：
+1. 直接回答：
+<think>...</think>
+<answer>...</answer>
+
+2. 请求一张高清局部裁剪图：
+<think>...</think>
 <tool_call>{{"name":"request_local_region","arguments":{{"bbox_2d":[x1,y1,x2,y2]}}}}</tool_call>
 
-The bounding box uses xyxy coordinates normalized to the integer range 0 to 1000,
-independent of the displayed image size. The origin is the top-left corner. The right
-and bottom coordinates are exclusive. You may call the tool at most once. Do not output
-an answer in the same turn as a tool call. An optional <think>...</think> block may
-precede the single action tag.
+其中 <think>...</think> 必须存在且内容非空。裁剪框使用归一化到 0～1000
+整数范围的 xyxy 坐标，与当前显示图片的尺寸无关；坐标原点位于左上角，右边界和
+下边界不包含在裁剪区域内。工具最多只能调用一次。调用工具时不得在同一轮输出
+<answer>...</answer>。
 """
 
 
 SECOND_PROMPT = """<image>
-This is the same low-resolution full image.
+这是同一张低分辨率完整图片。
 
 <image>
-This is the requested high-resolution crop.
+这是你请求的高清局部裁剪图。
 
-Question: {question}
+问题：{question}
 
-Use both images. Output the final response as <answer>...</answer>, with no text outside
-the tag. An optional <think>...</think> block may precede it. You cannot call another
-tool.
+请结合两张图片，严格按以下格式输出最终回答，不得在标签外输出任何文字：
+<think>...</think>
+<answer>...</answer>
+
+其中 <think>...</think> 必须存在且内容非空。你不能再次调用工具。
 """
+
+
+def _localize_question_instruction(question: str) -> str:
+    """Translate the dataset's common answer-format suffix without changing its task."""
+
+    return question.replace(
+        "Answer the question with a single word or phrase.",
+        "请用一个单词或短语回答问题。",
+    )
 
 
 class AdaptiveVisionEnvironmentManager:
@@ -91,7 +105,7 @@ class AdaptiveVisionEnvironmentManager:
 
     def _initial_observation(self, state: dict[str, Any]) -> tuple[str, list[np.ndarray], dict[str, Any]]:
         text = INITIAL_PROMPT.format(
-            question=state["question"],
+            question=_localize_question_instruction(state["question"]),
             width=state["low_width"],
             height=state["low_height"],
         )
@@ -246,7 +260,9 @@ class AdaptiveVisionEnvironmentManager:
                     state["stage"] = "answer_after_tool"
                     state["last_images"] = [state["low_image"], crop]
                     next_texts.append(
-                        SECOND_PROMPT.format(question=state["question"])
+                        SECOND_PROMPT.format(
+                            question=_localize_question_instruction(state["question"])
+                        )
                     )
                     next_images.append(state["last_images"])
                     next_anchors.append(

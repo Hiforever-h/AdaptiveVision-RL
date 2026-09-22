@@ -25,9 +25,9 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(action.kind, "tool")
         self.assertEqual(action.bbox, (40.0, 60.0, 200.0, 225.0))
 
-    def test_qwen_action_only_tool_call_uses_normalized_coordinates(self):
+    def test_qwen_tool_call_uses_normalized_coordinates(self):
         action = parse_action(
-            '<tool_call>{"name":"request_local_region",'
+            '<think>I need to zoom in.</think><tool_call>{"name":"request_local_region",'
             '"arguments":{"bbox_2d":[549,79,625,103]}}</tool_call>',
             allow_tool=True,
             image_size=(440, 180),
@@ -36,14 +36,29 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(action.kind, "tool")
         self.assertEqual(action.bbox, (241.56, 14.22, 275.0, 18.54))
 
-    def test_action_only_answer_is_valid(self):
-        action = parse_action(
-            "<answer>42</answer>",
-            allow_tool=True,
-            image_size=(400, 300),
+    def test_think_block_is_required_for_both_actions(self):
+        self.assertFalse(
+            parse_action(
+                "<answer>42</answer>",
+                allow_tool=True,
+                image_size=(400, 300),
+            ).valid
         )
-        self.assertTrue(action.valid)
-        self.assertEqual(action.answer, "42")
+        self.assertFalse(
+            parse_action(
+                '<tool_call>{"name":"request_local_region",'
+                '"arguments":{"bbox_2d":[100,200,500,750]}}</tool_call>',
+                allow_tool=True,
+                image_size=(400, 300),
+            ).valid
+        )
+        self.assertFalse(
+            parse_action(
+                "<think></think><answer>42</answer>",
+                allow_tool=True,
+                image_size=(400, 300),
+            ).valid
+        )
 
     def test_rejects_second_or_out_of_bounds_tool(self):
         text = (

@@ -28,7 +28,9 @@ python -m unittest discover -s tests -v
 
 ## 已实现的训练语义
 
-- 第一轮输入低分辨率全图和问题，策略选择直接回答或请求一次局部高清裁剪。
+- 第一轮输入低分辨率全图和问题，策略必须在两种完整格式中二选一：
+  `<think>...</think><answer>...</answer>`，或
+  `<think>...</think><tool_call>...</tool_call>`。`think` 标签及其非空内容为必需项。
 - 裁剪工具接收 Qwen-VL 原生的 0～1000 归一化 `xyxy` 坐标；环境按低清图
   尺寸换算后映射到原图执行裁剪，参考框与 Coverage+IoU 仍使用 0～1 坐标。
 - 合法裁剪请求会产生第二轮模型输出，第二轮不得再次调用工具。
@@ -47,7 +49,7 @@ python -m unittest discover -s tests -v
 - 一轮直接回答仅使用 `A_outcome`。两轮轨迹的完整第一轮输出使用
   `A_outcome + 0.3 * A_tool`，第二轮回答使用 `A_outcome`。
 - PPO 分别对工具轮 token 和回答轮 token 做归一化。每个训练 step 生成
-  32 条轨迹，展开后得到 32～64 个 turn row；不足 64 的部分使用零 loss
+  64 条轨迹，展开后得到 64～128 个 turn row；不足 128 的部分使用零 loss
   padding 补齐。Padding 不参与奖励、优势、token 分母或训练指标。
 - 当前答案正确性采用项目已有的确定性精确匹配／数值匹配，不在训练期间调用在线
   Judge 模型。
@@ -194,7 +196,7 @@ bash scripts/run_dtpo_lora.sh \
 Smoke test 需要重点确认：
 
 - vLLM 能接收第二轮的两张图片；
-- 32～64 个真实 turn row 能正确 padding 到 64；
+- 64～128 个真实 turn row 能正确 padding 到 128；
 - `loss_mask` 中 padding 权重为 0；
 - LoRA 权重能在 FSDP Actor 和 vLLM rollout 间同步；
 - 日志中出现 DTPO 与视觉 token 指标。
@@ -272,15 +274,15 @@ bash scripts/run_dtpo_lora.sh \
 
 | 配置 | 数值 | 含义 |
 | --- | ---: | --- |
-| `data.train_batch_size` | 4 | 每个训练 step 的不同问题数 |
+| `data.train_batch_size` | 8 | 每个训练 step 的不同问题数 |
 | `env.rollout.n` | 8 | 每个问题在线采样的轨迹数 |
-| 真实 trajectory 数 | 32 | `4 × 8` |
-| 真实 turn row 数 | 32～64 | 直接回答 1 行，工具轨迹 2 行 |
-| Padding 后 row 数 | 64 | Padding row 的 loss 为 0 |
-| `ppo_mini_batch_size` | 64 | 覆盖完整的 step-expanded batch |
-| `ppo_micro_batch_size_per_gpu` | 1 | 每次前向／反向处理的 row 数 |
-| 梯度累积次数 | 64 | `64 ÷ 1` |
-| `rollout.log_prob_micro_batch_size_per_gpu` | 1 | 旧策略 log-prob micro batch |
+| 真实 trajectory 数 | 64 | `8 × 8` |
+| 真实 turn row 数 | 64～128 | 直接回答 1 行，工具轨迹 2 行 |
+| Padding 后 row 数 | 128 | Padding row 的 loss 为 0 |
+| `ppo_mini_batch_size` | 128 | 覆盖完整的 step-expanded batch |
+| `ppo_micro_batch_size_per_gpu` | 8 | 每次前向／反向处理的 row 数 |
+| 梯度累积次数 | 16 | `128 ÷ 8` |
+| `rollout.log_prob_micro_batch_size_per_gpu` | 16 | 旧策略 log-prob micro batch |
 
 ## 集成约束
 

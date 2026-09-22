@@ -9,12 +9,12 @@ from typing import Literal
 
 
 _DIRECT_RE = re.compile(
-    r"^\s*(?:<think>(?P<think>.*?)</think>\s*)?"
+    r"^\s*<think>(?P<think>.*?)</think>\s*"
     r"<answer>(?P<answer>.*?)</answer>\s*$",
     re.DOTALL,
 )
 _TOOL_RE = re.compile(
-    r"^\s*(?:<think>(?P<think>.*?)</think>\s*)?"
+    r"^\s*<think>(?P<think>.*?)</think>\s*"
     r"<tool_call>(?P<call>.*?)</tool_call>\s*$",
     re.DOTALL,
 )
@@ -47,8 +47,8 @@ def _unwrap_boxed(value: str) -> str:
 def extract_answer_candidate(text: str) -> str | None:
     """Extract answer content even when the rest of the format is invalid.
 
-    Accuracy and format are separate rewards. A missing ``<think>`` block should
-    therefore lose format reward without automatically losing answer accuracy.
+    Accuracy and format are separate rewards. A missing ``<think>`` block therefore
+    loses format reward without automatically losing answer accuracy.
     """
 
     if not isinstance(text, str):
@@ -65,8 +65,8 @@ def parse_action(text: str, *, allow_tool: bool, image_size: tuple[int, int]) ->
 
     Tool coordinates use Qwen-VL's native 0--1000 normalized ``xyxy`` space and
     are converted to the displayed low-resolution image here. Right and bottom
-    are exclusive. A ``think`` block is optional, but extra text outside the
-    action tags is rejected so the format reward has an unambiguous definition.
+    are exclusive. A non-empty ``think`` block is required, and extra text outside
+    the action tags is rejected so the format reward has an unambiguous definition.
     """
 
     if not isinstance(text, str):
@@ -74,7 +74,7 @@ def parse_action(text: str, *, allow_tool: bool, image_size: tuple[int, int]) ->
 
     direct = _DIRECT_RE.fullmatch(text)
     if direct:
-        if direct.group("think") is not None and not _nonempty(direct.group("think")):
+        if not _nonempty(direct.group("think")):
             return ParsedAction("invalid", False, error="empty think block")
         answer = _unwrap_boxed(direct.group("answer"))
         if not answer:
@@ -86,7 +86,7 @@ def parse_action(text: str, *, allow_tool: bool, image_size: tuple[int, int]) ->
         return ParsedAction("invalid", False, error="response does not match answer or tool schema")
     if not allow_tool:
         return ParsedAction("invalid", False, error="a second tool call is not allowed")
-    if tool.group("think") is not None and not _nonempty(tool.group("think")):
+    if not _nonempty(tool.group("think")):
         return ParsedAction("invalid", False, error="empty think block")
 
     try:

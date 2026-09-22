@@ -1,7 +1,7 @@
 data:
   train_files: data/verl_agent/train.parquet
   val_files: data/verl_agent/val.parquet
-  train_batch_size: 4
+  train_batch_size: 8
   val_batch_size: 64
   max_prompt_length: 6144
   max_response_length: 512
@@ -10,7 +10,7 @@ data:
   return_raw_chat: true
   image_key: images
   apply_chat_template_kwargs:
-    enable_thinking: false
+    enable_thinking: true
 
 actor_rollout_ref:
   model:
@@ -29,12 +29,12 @@ actor_rollout_ref:
       lr: 1.0e-6
       weight_decay: 0.01
       lr_warmup_steps_ratio: 0.03
-    # 4 prompts x 8 rollouts x at most 2 turns = 64 step rows. Direct-only
-    # batches are padded to 64 with zero-loss rows so both DTPO denominators
+    # 8 prompts x 8 rollouts x at most 2 turns = 128 step rows. Direct-only
+    # batches are padded to 128 with zero-loss rows so both DTPO denominators
     # are computed over the complete rollout batch, not separate PPO chunks.
-    ppo_mini_batch_size: 64
+    ppo_mini_batch_size: 128
     ppo_micro_batch_size: null
-    ppo_micro_batch_size_per_gpu: 1
+    ppo_micro_batch_size_per_gpu: 8
     ppo_epochs: 1
     clip_ratio: 0.2
     clip_ratio_low: 0.2
@@ -56,7 +56,7 @@ actor_rollout_ref:
     top_k: -1
     tensor_model_parallel_size: 1
     log_prob_micro_batch_size: null
-    log_prob_micro_batch_size_per_gpu: 1
+    log_prob_micro_batch_size_per_gpu: 16
     gpu_memory_utilization: 0.42
     enable_chunked_prefill: false
     enforce_eager: true
