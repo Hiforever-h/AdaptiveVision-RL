@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import torch
 
 from .trajectory import extract_trajectory_views
@@ -37,6 +38,12 @@ class AdaptiveVisionRewardManager:
         response_length = data.batch["responses"].shape[-1]
         response_mask = attention_mask[:, -response_length:]
         tool_coefficient = float(self.dtpo_config.tool_advantage_coef)
+        # verl-agent's metric_utils applies NumPy reductions followed by
+        # ``.item()`` to this non-tensor field. An object array containing
+        # Python floats returns a Python float from ``max()``, which has no
+        # ``.item()``. Build a numeric array explicitly instead of mutating the
+        # object array produced by the trajectory collector.
+        episode_rewards = np.zeros(row_count, dtype=np.float32)
 
         for view in views:
             record = view.reward
@@ -59,7 +66,7 @@ class AdaptiveVisionRewardManager:
                 extras["vision_tokens_processed"][row] = view.vision_tokens_processed
                 extras["vision_tokens_full"][row] = view.vision_tokens_full
                 extras["vision_token_ratio"][row] = ratio
-                data.non_tensor_batch["episode_rewards"][row] = (
+                episode_rewards[row] = (
                     record.outcome_reward + tool_coefficient * record.tool_reward
                 )
 
@@ -72,6 +79,8 @@ class AdaptiveVisionRewardManager:
                     reward_tensor[view.tool_row, tool_length - 1] = (
                         tool_coefficient * record.tool_reward
                     )
+
+        data.non_tensor_batch["episode_rewards"] = episode_rewards
 
         if return_dict:
             return {"reward_tensor": reward_tensor, "reward_extra_info": extras}
