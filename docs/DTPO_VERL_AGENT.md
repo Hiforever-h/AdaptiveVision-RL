@@ -203,7 +203,13 @@ trainer:
 ```
 
 最后一个训练 step 无论能否被 250 整除都会保存。输出目录由
-`trainer.default_local_dir` 控制。
+`trainer.default_local_dir` 控制。当前默认训练输出均写到 AutoDL 数据盘：
+
+```text
+/root/autodl-tmp/checkpoints/qwen3vl_4b_dtpo_lora  # checkpoint 与最终 LoRA adapter
+/root/autodl-tmp/outputs/rollouts/qwen3vl_4b_dtpo_lora  # rollout JSONL
+/root/autodl-tmp/wandb  # WandB 本地日志
+```
 
 默认 WandB project 为 `adaptive_vision_rl`，run name 为
 `qwen3vl_4b_dtpo_lora`。可在启动时覆盖，例如：
