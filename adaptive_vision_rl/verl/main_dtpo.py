@@ -33,7 +33,8 @@ def run_dtpo(config):
             {**config.get("ray_init", {}), "runtime_env": runtime}
         )
         ray.init(**OmegaConf.to_container(ray_kwargs, resolve=True))
-    ray.get(DTPOTaskRunner.remote(config))
+    runner = DTPOTaskRunner.remote()
+    ray.get(runner.run.remote(config))
 
 
 @ray.remote(num_cpus=1)

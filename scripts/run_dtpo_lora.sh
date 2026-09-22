@@ -32,6 +32,10 @@ done
 export PYTHONPATH="${PROJECT_ROOT}:${VERL_AGENT_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 export TOKENIZERS_PARALLELISM=false
 export VLLM_USE_V1=1
+if [[ ! "${OMP_NUM_THREADS:-}" =~ ^[1-9][0-9]*$ ]]; then
+  export OMP_NUM_THREADS=1
+fi
+export RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO="${RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO:-0}"
 export WANDB_DIR="${WANDB_DIR:-/root/autodl-tmp/wandb}"
 mkdir -p "${WANDB_DIR}"
 
