@@ -55,8 +55,10 @@ class EnvironmentTests(unittest.TestCase):
 
     def test_direct_answer_is_one_turn_without_tool_reward(self):
         observations, _ = self.environment.reset([self.row])
-        self.assertIn("你必须且只能选择以下两种格式之一输出", observations["text"][0])
+        self.assertIn("You must choose exactly one", observations["text"][0])
         self.assertIn("<think>...</think>", observations["text"][0])
+        self.assertIn("Format example for Action 1", observations["text"][0])
+        self.assertIn("Format example for Action 2", observations["text"][0])
         observations, rewards, dones, infos = self.environment.step(
             ["<think>The answer is visible.</think><answer>42</answer>"]
         )
