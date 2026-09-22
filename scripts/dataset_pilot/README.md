@@ -69,6 +69,9 @@ DeepSeek 密钥从项目根目录 `.env` 的 `DEEPSEEK_API_KEY` 读取；Z.AI �
 | `prepare.py` | 从 8 个 HF viewer 窗口取候选，固定抽样并下载原图 |
 | `prompt.txt` | 固定的英文区域标注提示词 |
 | `annotate.py` | 调用 API、缓存、结构校验、答案自动核对 |
+| `replace_invalid_train.py` | 按原 `use_tool` 分层，从固定源缓存补充未使用且去重的 Train 样本 |
+| `full_review_gallery.py` | 为完整 split 生成逐条复核、框编辑和实时裁剪预览 HTML |
+| `apply_review_edits.py` | 校验 HTML 导出的复核与框修改，并生成新的 reviewed annotations |
 | `common.py` | 坐标约定、像素转换、答案比较、文件读写 |
 | `reward.py` | 纯本地 coverage / IoU 奖励，无 LLM 调用 |
 | `report.py` | 原图框选、真实裁剪、HTML 报告与 JSONL 导出 |

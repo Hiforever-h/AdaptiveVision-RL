@@ -7,3 +7,12 @@ __pycache__/
 data/
 .cache/
 .pytest_cache/
+checkpoints/
+outputs/
+wandb/
+/third_party/verl-agent/
+/reports/train_manual_box_edits_20260922
+/reports/train_replacement_20260923
+/reports/train_replacement_20260924_retry1
+/reports/train3000_glm53_max_full_review
+/reports/train3000_glm53_max_sample20

@@ -8,3 +8,5 @@ dependencies:
   - requests
   - python-dotenv
   - pyarrow
+  - numpy
+  - pytest

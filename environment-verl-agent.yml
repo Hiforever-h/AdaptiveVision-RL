@@ -1,0 +1,11 @@
+name: adaptive-vision-dtpo
+channels:
+  - defaults
+dependencies:
+  - python=3.12
+  - pip
+  - numpy
+  - pillow
+  - pyarrow>=19
+  - pip:
+      - pytest
