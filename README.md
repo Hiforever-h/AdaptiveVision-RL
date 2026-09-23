@@ -4,12 +4,6 @@
 
 项目已完成数据构建、区域标注、GRPO 训练和基准评测。正式数据冻结为 3,000 条 Train、300 条 Val 和 500 条 Test；Train 按原数据 `use_tool` 提示分层，低清即可回答与建议使用高清各 1,500 条。教师模型使用 `glm-5.3-flash`、`reasoning_effort=max` 和像素坐标，在线工具奖励采用 Coverage 与 IoU 的加权几何平均。
 
-- [脚本及复现方式](scripts/dataset_pilot/README.md)
-- [区域标注试验结果](reports/pilot20/RESULTS.md)
-- [实验观察](reports/pilot20/FINDINGS.md)
-- [三版提示词配对对照](reports/PROMPT_COMPARISON.md)
-- [可视化报告](reports/pilot20/index.html)
-
 训练采用 LoRA 与 GRPO，仅更新低秩适配参数而不进行全参数训练；同时接入两轮裁剪环境、Coverage + IoU 工具奖励、0.01 工具调用成本和 Qwen3-VL 视觉 token 统计。推理阶段最多进行一次局部裁剪；若低分辨率图像已经包含足够信息，模型直接作答。
 
 ## 训练配置
@@ -109,25 +103,25 @@ $$
 本项目不使用额外奖励模型判断裁剪是否正确，而是直接利用训练集中的参考区域计算几何奖励。设模型实际执行的裁剪框为 $p$，参考框为 $g$，二者交集面积为 $I(p,g)$，则：
 
 $$
-I(p,g)=\operatorname{area}(p\cap g),
+I(p,g)=\mathrm{area}(p\cap g),
 $$
 
 $$
-\operatorname{Coverage}(p,g)=\frac{I(p,g)}{\operatorname{area}(g)},
+\mathrm{Coverage}(p,g)=\frac{I(p,g)}{\mathrm{area}(g)},
 \qquad
-\operatorname{IoU}(p,g)=\frac{I(p,g)}{\operatorname{area}(p)+\operatorname{area}(g)-I(p,g)}.
+\mathrm{IoU}(p,g)=\frac{I(p,g)}{\mathrm{area}(p)+\mathrm{area}(g)-I(p,g)}.
 $$
 
 Coverage 保证参考证据尽量完整地落在裁剪区域内，IoU 则抑制过大的裁剪框。最终工具奖励采用二者的加权几何平均：
 
 $$
 R_{\text{tool}}(p)=\max_{g\in\mathcal{G}}
-\operatorname{Coverage}(p,g)^{w}
-\operatorname{IoU}(p,g)^{1-w},
+\mathrm{Coverage}(p,g)^{w}
+\mathrm{IoU}(p,g)^{1-w},
 \qquad w=0.5.
 $$
 
-因此当前配置等价于 $R_{\text{tool}}=\max_{g\in\mathcal{G}}\sqrt{\operatorname{Coverage}\cdot\operatorname{IoU}}$。若一个样本有多个可接受参考框，取奖励最高者；没有参考框的轨迹不参与工具优势的统计，而不是按零奖励处理。
+因此当前配置等价于 $R_{\text{tool}}=\max_{g\in\mathcal{G}}\sqrt{\mathrm{Coverage}\cdot\mathrm{IoU}}$。若一个样本有多个可接受参考框，取奖励最高者；没有参考框的轨迹不参与工具优势的统计，而不是按零奖励处理。
 
 最终答案对应的结果奖励为：
 
@@ -176,7 +170,7 @@ $$
 \ell_{i,t}^{\text{clip}}=
 \max\left(
 -\rho_{i,t}A_{i,t},
--\operatorname{clip}(\rho_{i,t},1-\epsilon_{\text{low}},1+\epsilon_{\text{high}})A_{i,t}
+-\mathrm{clip}(\rho_{i,t},1-\epsilon_{\text{low}},1+\epsilon_{\text{high}})A_{i,t}
 \right).
 $$
 
