@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from adaptive_vision_rl.answer_reward import decode_answer_reward
 from adaptive_vision_rl.dtpo_core import TrajectoryReward, assign_dtpo_rewards_and_advantages
 
 
@@ -64,8 +65,7 @@ def extract_trajectory_views(data, dtpo_config) -> list[TrajectoryView]:
         tool_row = decision_rows[0] if used_tool else None
         answer_row = answer_after_tool_rows[0] if used_tool else decision_rows[0]
         answer_base_reward = float(step_rewards[answer_row])
-        accuracy = 1.0 if answer_base_reward >= 1.0 else 0.0
-        format_reward = max(0.0, min(0.5, answer_base_reward - accuracy))
+        accuracy, score, format_reward = decode_answer_reward(answer_base_reward)
         decision_anchor = _as_dict(anchors[decision_rows[0]])
         answer_anchor = _as_dict(anchors[answer_row])
         tool_reward = float(step_rewards[tool_row]) if tool_row is not None else 0.0
@@ -86,6 +86,7 @@ def extract_trajectory_views(data, dtpo_config) -> list[TrajectoryView]:
             trajectory_id=trajectory_id,
             group_id=group_id,
             accuracy=accuracy,
+            answer_score=score,
             format_reward=format_reward,
             used_tool=used_tool,
             tool_reward=tool_reward,

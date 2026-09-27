@@ -20,6 +20,7 @@ class AdaptiveVisionRewardManager:
         row_count = len(data)
         extras = {
             "dtpo_accuracy": [0.0] * row_count,
+            "dtpo_answer_score": [0.0] * row_count,
             "dtpo_format_reward": [0.0] * row_count,
             "dtpo_balance_reward": [0.0] * row_count,
             "dtpo_outcome_reward": [0.0] * row_count,
@@ -54,6 +55,9 @@ class AdaptiveVisionRewardManager:
             )
             for row in view.row_indices:
                 extras["dtpo_accuracy"][row] = record.accuracy
+                extras["dtpo_answer_score"][row] = (
+                    record.answer_score if record.answer_score is not None else record.accuracy
+                )
                 extras["dtpo_format_reward"][row] = record.format_reward
                 extras["dtpo_balance_reward"][row] = record.balance_reward
                 extras["dtpo_outcome_reward"][row] = record.outcome_reward

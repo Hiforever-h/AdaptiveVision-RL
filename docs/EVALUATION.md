@@ -1,7 +1,7 @@
 # DTPO 模型评测
 
 评测脚本对冻结的 500 条 Test 数据执行确定性两轮推理。它复用训练时的提示词、
-动作解析、裁剪坐标换算、答案精确匹配、格式奖励和 Coverage+IoU 区域奖励口径，
+动作解析、裁剪坐标换算、答案精确准确率与数值相似度部分奖励、格式奖励和 Coverage+IoU 区域奖励口径，
 并直接用 vLLM 加载 verl-agent 保存的 LoRA adapter，无需先合并模型。
 
 ## 运行环境
@@ -49,7 +49,9 @@ python scripts/evaluate_dtpo.py \
 
 显存不足时可降低 `--batch-size` 或 `--gpu-memory-utilization`。`--batch-size` 只控制
 每批送入脚本的样本数；vLLM 仍会在批内动态调度。默认 greedy decoding 参数与训练
-validation 保持一致：temperature 0、单条输出、最多 512 个 response token。
+validation 保持一致：temperature 0、单条输出、最多 1024 个 response token。
+默认基座为 `Qwen/Qwen3-VL-4B-Thinking`，评估与训练使用同一模板适配，
+提示词只预填 assistant 前缀，由 completion 生成完整 `<think>...</think>`。
 
 ## 输出
 
@@ -60,7 +62,7 @@ validation 保持一致：temperature 0、单条输出、最多 512 个 response
 - `summary.json`：模型与 adapter 指纹、数据文件指纹、解码参数、总体指标和按原始
   `use_tool` 提示分层的指标。
 
-主要指标包括准确率、直接回答/工具路径准确率、工具调用率、格式合规率、无效动作率、
+主要指标包括精确准确率、平均答案分、直接回答/工具路径准确率、工具调用率、格式合规率、无效动作率、
 合格工具调用的几何奖励、获取及实际处理的视觉 token、相对全图 token 比例和吞吐。
 区域框是离线伪标签，因此几何奖励用于诊断工具行为，不应代替最终答案准确率。
 

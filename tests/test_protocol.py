@@ -38,24 +38,20 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(action.kind, "tool")
         self.assertEqual(action.bbox, (241.56, 14.22, 275.0, 18.54))
 
-    def test_think_block_is_optional_but_must_be_nonempty_when_present(self):
+    def test_think_block_is_required_and_must_be_nonempty(self):
         direct = parse_action(
             "<answer>42</answer>",
             allow_tool=True,
             image_size=(400, 300),
         )
-        self.assertTrue(direct.valid)
-        self.assertFalse(direct.has_think)
-        self.assertEqual(direct.answer, "42")
+        self.assertFalse(direct.valid)
         tool = parse_action(
             '<tool_call>{"name":"request_local_region",'
             '"arguments":{"bbox_2d":[100,200,500,750]}}</tool_call>',
             allow_tool=True,
             image_size=(400, 300),
         )
-        self.assertTrue(tool.valid)
-        self.assertEqual(tool.kind, "tool")
-        self.assertFalse(tool.has_think)
+        self.assertFalse(tool.valid)
         self.assertFalse(
             parse_action(
                 "<think></think><answer>42</answer>",
@@ -73,6 +69,13 @@ class ProtocolTests(unittest.TestCase):
         self.assertFalse(
             parse_action(
                 "<think>……</think><answer>42</answer>",
+                allow_tool=True,
+                image_size=(400, 300),
+            ).valid
+        )
+        self.assertFalse(
+            parse_action(
+                "\n<think>Readable.</think><answer>42</answer>",
                 allow_tool=True,
                 image_size=(400, 300),
             ).valid
@@ -105,6 +108,20 @@ class ProtocolTests(unittest.TestCase):
         self.assertFalse(
             parse_action(
                 '<think>x</think><tool_call>{"name":"other","arguments":{}}</tool_call>',
+                allow_tool=True,
+                image_size=(10, 10),
+            ).valid
+        )
+        self.assertFalse(
+            parse_action(
+                "<think>x<think>y</think><answer>1</answer>",
+                allow_tool=True,
+                image_size=(10, 10),
+            ).valid
+        )
+        self.assertFalse(
+            parse_action(
+                "<think>x</think><answer>1</answer><answer>2</answer>",
                 allow_tool=True,
                 image_size=(10, 10),
             ).valid

@@ -1,6 +1,8 @@
 import unittest
+from struct import pack, unpack
 from types import SimpleNamespace
 
+from adaptive_vision_rl.answer_reward import decode_answer_reward, encode_answer_reward
 from adaptive_vision_rl.verl.trajectory import extract_trajectory_views
 
 
@@ -96,6 +98,30 @@ class TrajectoryTests(unittest.TestCase):
         views = extract_trajectory_views(FakeValidationData(), config)
         self.assertEqual([view.reward.group_id for view in views], ["question-a", "question-b"])
         self.assertEqual([view.reward.outcome_advantage for view in views], [0.0, 0.0])
+
+    def test_partial_number_preserves_exact_accuracy_and_format(self):
+        data = FakeValidationData()
+        data.non_tensor_batch["rewards"][1] = encode_answer_reward(
+            correct=False, score=42130 / 42138, format_reward=0.25
+        )
+        config = SimpleNamespace(
+            balance_penalty=0.01,
+            balance_threshold=0.2,
+            advantage_epsilon=1e-6,
+        )
+        reward = extract_trajectory_views(data, config)[1].reward
+        self.assertEqual(reward.accuracy, 0.0)
+        self.assertAlmostEqual(reward.answer_score, 42130 / 42138)
+        self.assertEqual(reward.format_reward, 0.25)
+        self.assertAlmostEqual(reward.outcome_reward, 42130 / 42138 + 0.25)
+
+    def test_nearly_exact_score_survives_float32_reward_transport(self):
+        packed = encode_answer_reward(correct=False, score=0.9999, format_reward=0.5)
+        stored = unpack("f", pack("f", packed))[0]
+        accuracy, score, format_reward = decode_answer_reward(stored)
+        self.assertEqual(accuracy, 0.0)
+        self.assertEqual(format_reward, 0.5)
+        self.assertAlmostEqual(score, 0.9999, places=5)
 
 
 if __name__ == "__main__":

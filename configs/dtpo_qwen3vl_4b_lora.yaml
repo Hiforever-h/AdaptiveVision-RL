@@ -4,17 +4,14 @@ data:
   train_batch_size: 8
   val_batch_size: 64
   max_prompt_length: 6144
-  max_response_length: 512
+  max_response_length: 1024
   filter_overlong_prompts: false
   truncation: error
   return_raw_chat: true
   image_key: images
-  apply_chat_template_kwargs:
-    enable_thinking: false
-
 actor_rollout_ref:
   model:
-    path: Qwen/Qwen3-VL-4B-Instruct
+    path: Qwen/Qwen3-VL-4B-Thinking
     external_lib: adaptive_vision_rl.verl_agent_hooks
     lora_rank: 64
     lora_alpha: 128

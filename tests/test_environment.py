@@ -3,6 +3,8 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
+from adaptive_vision_rl.answer_reward import decode_answer_reward
+
 try:
     import numpy as np
     from PIL import Image
@@ -55,8 +57,7 @@ class EnvironmentTests(unittest.TestCase):
 
     def test_direct_answer_is_one_turn_without_tool_reward(self):
         observations, _ = self.environment.reset([self.row])
-        self.assertIn("Output exactly one action", observations["text"][0])
-        self.assertIn("optionally place one non-empty", observations["text"][0])
+        self.assertIn("Your response MUST start with <think>", observations["text"][0])
         self.assertNotIn("Example", observations["text"][0])
         observations, rewards, dones, infos = self.environment.step(
             ["<think>The answer is visible.</think><answer>42</answer>"]
@@ -67,12 +68,24 @@ class EnvironmentTests(unittest.TestCase):
         self.assertEqual(observations["text"][0].count("<image>"), 1)
         self.assertEqual(len(observations["image"][0]), 1)
 
-    def test_direct_answer_without_think_receives_half_format_credit(self):
+    def test_direct_answer_without_think_is_invalid_and_earns_no_format_credit(self):
         self.environment.reset([self.row])
         _, rewards, dones, infos = self.environment.step(["<answer>42</answer>"])
         self.assertTrue(dones[0])
-        self.assertEqual(float(rewards[0]), 1.25)
-        self.assertEqual(infos[0]["format_reward"], 0.25)
+        self.assertFalse(infos[0]["is_action_valid"])
+        self.assertEqual(float(rewards[0]), 1.0)
+        self.assertEqual(infos[0]["format_reward"], 0.0)
+
+    def test_close_numeric_answer_gets_partial_score_but_not_accuracy(self):
+        self.environment.reset([{**self.row, "answers": ["42138"]}])
+        _, rewards, dones, infos = self.environment.step(["<answer>42130</answer>"])
+        accuracy, score, format_reward = decode_answer_reward(float(rewards[0]))
+        self.assertTrue(dones[0])
+        self.assertEqual(accuracy, 0.0)
+        self.assertAlmostEqual(score, 42130 / 42138, places=5)
+        self.assertEqual(format_reward, 0.0)
+        self.assertEqual(infos[0]["won"], 0.0)
+        self.assertAlmostEqual(infos[0]["answer_score"], score, places=5)
 
     def test_tool_reward_is_on_first_turn_and_second_turn_sees_two_images(self):
         observations, _ = self.environment.reset([self.row])
@@ -102,18 +115,19 @@ class EnvironmentTests(unittest.TestCase):
 
     def test_tool_trajectory_averages_format_over_both_turns(self):
         self.environment.reset([self.row])
-        call_without_think = (
-            '<tool_call>{"name":"request_local_region",'
+        call = (
+            '<think>I need detail.</think><tool_call>{"name":"request_local_region",'
             '"arguments":{"bbox_2d":[0,0,500,500]}}</tool_call>'
         )
-        _, _, dones, _ = self.environment.step([call_without_think])
+        _, _, dones, _ = self.environment.step([call])
         self.assertFalse(dones[0])
         _, rewards, dones, infos = self.environment.step(
-            ["<think>The crop confirms it.</think><answer>42</answer>"]
+            ["<answer>42</answer>"]
         )
         self.assertTrue(dones[0])
-        self.assertEqual(float(rewards[0]), 1.375)
-        self.assertEqual(infos[0]["format_reward"], 0.375)
+        self.assertFalse(infos[0]["is_action_valid"])
+        self.assertEqual(float(rewards[0]), 1.25)
+        self.assertEqual(infos[0]["format_reward"], 0.25)
 
     def test_mixed_batch_keeps_only_active_tool_images(self):
         direct = dict(self.row, sample_id="direct")

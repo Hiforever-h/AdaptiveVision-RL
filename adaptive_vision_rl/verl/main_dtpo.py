@@ -52,6 +52,7 @@ class DTPOTaskRunner:
         from verl.workers.fsdp_workers import ActorRolloutRefWorker, CriticWorker
 
         from adaptive_vision_rl.environment import make_adaptive_vision_envs
+        from adaptive_vision_rl.thinking_template import configure_thinking_tokenizer
         from adaptive_vision_rl.verl.collector import AdaptiveVisionTrajectoryCollector
         from adaptive_vision_rl.verl.dtpo import install_driver_hooks
         from adaptive_vision_rl.verl.reward_manager import AdaptiveVisionRewardManager
@@ -80,6 +81,9 @@ class DTPOTaskRunner:
         )
         if processor is None:
             raise ValueError("Qwen3-VL processor is required")
+        configure_thinking_tokenizer(tokenizer)
+        if processor.tokenizer is not tokenizer:
+            configure_thinking_tokenizer(processor.tokenizer)
         if config.actor_rollout_ref.model.lora_rank > 0 and not is_version_ge(
             pkg="vllm", minver="0.7.3"
         ):

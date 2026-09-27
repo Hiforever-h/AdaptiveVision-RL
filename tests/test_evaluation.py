@@ -8,6 +8,7 @@ from PIL import Image
 from adaptive_vision_rl.protocol import parse_action
 from scripts.evaluate_dtpo import (
     EvalSample,
+    _finalize_record,
     action_format_score,
     evaluate_batch,
     execute_crop,
@@ -41,7 +42,7 @@ class EvaluationTests(unittest.TestCase):
     def test_crop_uses_same_normalized_coordinate_mapping_as_environment(self):
         image = Image.new("RGB", (800, 400))
         action = parse_action(
-            '<tool_call>{"name":"request_local_region","arguments":'
+            '<think>The answer needs detail.</think><tool_call>{"name":"request_local_region","arguments":'
             '{"bbox_2d":[250,250,750,750]}}</tool_call>',
             allow_tool=True,
             image_size=(400, 200),
@@ -59,7 +60,7 @@ class EvaluationTests(unittest.TestCase):
             allow_tool=True,
             image_size=(400, 200),
         )
-        self.assertEqual(action_format_score(plain, "answer"), 0.5)
+        self.assertEqual(action_format_score(plain, "answer"), 0.0)
         self.assertEqual(action_format_score(reasoned, "answer"), 1.0)
 
     def test_metrics_separate_direct_and_tool_accuracy(self):
@@ -91,6 +92,42 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(metrics["direct_answer_accuracy"], 1.0)
         self.assertEqual(metrics["tool_answer_accuracy"], 0.0)
         self.assertEqual(metrics["tool_call_rate"], 0.5)
+
+    def test_close_number_affects_reward_but_not_exact_accuracy(self):
+        response = "<answer>42130</answer>"
+        sample = EvalSample(
+            sample_id="numeric",
+            question="What number?",
+            answers=["42138"],
+            image_path=Path("unused.png"),
+            lowres_path=Path("unused-low.png"),
+            reference_boxes=[],
+            tool_reward_eligible=False,
+            source_use_tool=False,
+        )
+        state = {
+            "sample": sample,
+            "first_action": parse_action(response, allow_tool=True, image_size=(400, 300)),
+            "used_tool": False,
+            "low_size": (400, 300),
+            "first_response": response,
+            "first_format_score": 0.0,
+            "vision_tokens_low": 1,
+            "vision_tokens_crop": 0,
+            "vision_tokens_full": 2,
+            "predicted_box": None,
+            "coverage": None,
+            "iou": None,
+            "tool_reward": None,
+            "first_seconds_per_sample": 0.0,
+        }
+        record = _finalize_record(state)
+        self.assertFalse(record["correct"])
+        self.assertAlmostEqual(record["answer_score"], 42130 / 42138)
+        self.assertAlmostEqual(record["outcome_reward"], 42130 / 42138)
+        metrics = metric_block([record])
+        self.assertEqual(metrics["accuracy"], 0.0)
+        self.assertAlmostEqual(metrics["answer_score"], 42130 / 42138)
 
     def test_batch_evaluation_runs_direct_and_tool_routes(self):
         class FakeGrid:
@@ -127,11 +164,11 @@ class EvaluationTests(unittest.TestCase):
             def generate(self, texts, images):
                 if all(len(group) == 1 for group in images):
                     return [
-                        "<answer>42</answer>",
-                        '<tool_call>{"name":"request_local_region","arguments":'
+                        "<think>The answer is visible.</think><answer>42</answer>",
+                        '<think>I need a crop.</think><tool_call>{"name":"request_local_region","arguments":'
                         '{"bbox_2d":[0,0,500,500]}}</tool_call>',
                     ]
-                return ["<answer>42</answer>"]
+                return ["<think>The crop shows 42.</think><answer>42</answer>"]
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

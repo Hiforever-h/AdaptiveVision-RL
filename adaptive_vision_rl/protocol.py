@@ -9,12 +9,12 @@ from typing import Literal
 
 
 _DIRECT_RE = re.compile(
-    r"^\s*(?:<think>(?P<think>.*?)</think>\s*)?"
+    r"^<think>(?P<think>.*?)</think>\s*"
     r"<answer>(?P<answer>.*?)</answer>\s*$",
     re.DOTALL,
 )
 _TOOL_RE = re.compile(
-    r"^\s*(?:<think>(?P<think>.*?)</think>\s*)?"
+    r"^<think>(?P<think>.*?)</think>\s*"
     r"<tool_call>(?P<call>.*?)</tool_call>\s*$",
     re.DOTALL,
 )
@@ -51,7 +51,7 @@ def _unwrap_boxed(value: str) -> str:
 def extract_answer_candidate(text: str) -> str | None:
     """Extract answer content even when the rest of the format is invalid.
 
-    The optional ``think`` block is part of a valid action only when it is non-empty.
+    A non-empty ``think`` block is required for a valid action.
     Accuracy and format rewards remain separate for otherwise malformed answers.
     """
 
@@ -69,30 +69,48 @@ def parse_action(text: str, *, allow_tool: bool, image_size: tuple[int, int]) ->
 
     Tool coordinates use Qwen-VL's native 0--1000 normalized ``xyxy`` space and
     are converted to the displayed low-resolution image here. Right and bottom
-    are exclusive. A ``think`` block is optional but must be non-empty when present.
+    are exclusive. A non-empty ``think`` block must start the completion.
     Extra text outside the action tags is rejected.
     """
 
     if not isinstance(text, str):
         return ParsedAction("invalid", False, error="response is not text")
+    if not text.startswith("<think>"):
+        return ParsedAction("invalid", False, error="response must start with <think>")
+    if text.count("<think>") != 1 or text.count("</think>") != 1:
+        return ParsedAction("invalid", False, error="response must contain one think block")
 
     direct = _DIRECT_RE.fullmatch(text)
     if direct:
+        if (
+            text.count("<answer>") != 1
+            or text.count("</answer>") != 1
+            or "<tool_call>" in text
+            or "</tool_call>" in text
+        ):
+            return ParsedAction("invalid", False, error="response must contain one answer action")
         think = direct.group("think")
-        if think is not None and not _nonempty(think):
+        if not _nonempty(think):
             return ParsedAction("invalid", False, error="empty think block")
         answer = _unwrap_boxed(direct.group("answer"))
         if not answer:
             return ParsedAction("invalid", False, error="empty answer block")
-        return ParsedAction("answer", True, has_think=think is not None, answer=answer)
+        return ParsedAction("answer", True, has_think=True, answer=answer)
 
     tool = _TOOL_RE.fullmatch(text)
     if not tool:
         return ParsedAction("invalid", False, error="response does not match answer or tool schema")
+    if (
+        text.count("<tool_call>") != 1
+        or text.count("</tool_call>") != 1
+        or "<answer>" in text
+        or "</answer>" in text
+    ):
+        return ParsedAction("invalid", False, error="response must contain one tool action")
     if not allow_tool:
         return ParsedAction("invalid", False, error="a second tool call is not allowed")
     think = tool.group("think")
-    if think is not None and not _nonempty(think):
+    if not _nonempty(think):
         return ParsedAction("invalid", False, error="empty think block")
 
     try:
@@ -121,4 +139,4 @@ def parse_action(text: str, *, allow_tool: bool, image_size: tuple[int, int]) ->
         x2 * width / 1000.0,
         y2 * height / 1000.0,
     )
-    return ParsedAction("tool", True, has_think=think is not None, bbox=image_bbox)
+    return ParsedAction("tool", True, has_think=True, bbox=image_bbox)

@@ -24,14 +24,18 @@ if str(ROOT) not in sys.path:
 
 from adaptive_vision_rl.prompts import INITIAL_PROMPT, SECOND_PROMPT
 from adaptive_vision_rl.protocol import ParsedAction, extract_answer_candidate, parse_action
-from scripts.dataset_pilot.common import answer_check, pixel_box, read_jsonl
+from adaptive_vision_rl.thinking_template import (
+    apply_thinking_chat_template,
+    configure_thinking_tokenizer,
+)
+from scripts.dataset_pilot.common import answer_check, answer_score, pixel_box, read_jsonl
 from scripts.dataset_pilot.reward import geometry_reward
 
 
 DEFAULT_DATASET = ROOT / "data/visionthink_3000_300_500_balanced"
 DEFAULT_CHECKPOINT = Path("/root/autodl-tmp/checkpoints/qwen3vl_4b_dtpo_lora")
 DEFAULT_OUTPUT = Path("/root/autodl-tmp/outputs/evaluation/qwen3vl_4b_dtpo_lora_test")
-DEFAULT_MODEL = "Qwen/Qwen3-VL-4B-Instruct"
+DEFAULT_MODEL = "Qwen/Qwen3-VL-4B-Thinking"
 IMAGE_TOKEN = "<|vision_start|><|image_pad|><|vision_end|>"
 
 
@@ -191,19 +195,14 @@ def render_prompt(processor: Any, text: str, image_count: int) -> str:
             f"{image_count} images"
         )
     chat = [{"role": "user", "content": text}]
-    prompt = processor.tokenizer.apply_chat_template(
-        chat,
-        add_generation_prompt=True,
-        tokenize=False,
-        enable_thinking=False,
-    )
+    prompt = apply_thinking_chat_template(processor.tokenizer, chat)
     return prompt.replace("<image>", IMAGE_TOKEN)
 
 
 def action_format_score(action: ParsedAction, expected_kind: str) -> float:
-    if not action.valid or action.kind != expected_kind:
+    if not action.valid or not action.has_think or action.kind != expected_kind:
         return 0.0
-    return 1.0 if action.has_think else 0.5
+    return 1.0
 
 
 def execute_crop(
@@ -260,6 +259,7 @@ class VLLMEvaluator:
             trust_remote_code=args.trust_remote_code,
             use_fast=True,
         )
+        configure_thinking_tokenizer(self.processor.tokenizer)
         self.llm = LLM(
             model=args.model,
             tensor_parallel_size=1,
@@ -327,6 +327,9 @@ def metric_block(records: Sequence[dict[str, Any]]) -> dict[str, Any]:
     return {
         "count": len(records),
         "accuracy": _mean(float(record["correct"]) for record in records),
+        "answer_score": _mean(
+            float(record.get("answer_score", record["correct"])) for record in records
+        ),
         "direct_answer_accuracy": _mean(
             float(record["correct"]) for record in direct_records
         ),
@@ -425,6 +428,7 @@ def _finalize_record(
         if prediction is not None
         else {"match": False, "method": "missing_answer"}
     )
+    score = answer_score(prediction, sample.answers) if prediction is not None else 0.0
     acquired = state["vision_tokens_low"] + state["vision_tokens_crop"]
     processed = (
         state["vision_tokens_low"]
@@ -438,6 +442,7 @@ def _finalize_record(
         "references": sample.answers,
         "prediction": prediction,
         "correct": bool(check["match"]),
+        "answer_score": score,
         "answer_match_method": check["method"],
         "source_use_tool": sample.source_use_tool,
         "used_tool": state["used_tool"],
@@ -449,7 +454,7 @@ def _finalize_record(
         "second_response": second_response,
         "format_reward": format_reward,
         "format_compliance": format_reward / 0.5,
-        "outcome_reward": float(check["match"]) + format_reward,
+        "outcome_reward": score + format_reward,
         "tool_reward_eligible": sample.tool_reward_eligible,
         "predicted_box": state["predicted_box"],
         "reference_boxes": sample.reference_boxes,
@@ -606,8 +611,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--offset", type=int, default=0)
     parser.add_argument("--limit", type=int)
-    parser.add_argument("--max-response-tokens", type=int, default=512)
-    parser.add_argument("--max-model-len", type=int, default=6656)
+    parser.add_argument("--max-response-tokens", type=int, default=1024)
+    parser.add_argument("--max-model-len", type=int, default=7168)
     parser.add_argument("--max-num-batched-tokens", type=int, default=8192)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.80)
     parser.add_argument("--dtype", default="bfloat16")

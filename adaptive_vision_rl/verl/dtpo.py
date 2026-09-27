@@ -171,6 +171,7 @@ def compute_dtpo_metrics(batch) -> dict[str, float]:
     tool_rewards = values("dtpo_tool_reward")
     metrics = {
         "dtpo/accuracy": float(accuracy.mean()),
+        "dtpo/answer_score": float(values("dtpo_answer_score").mean()),
         "dtpo/format_compliance": float((values("dtpo_format_reward") / 0.5).mean()),
         "dtpo/balance_reward": float(values("dtpo_balance_reward").mean()),
         "dtpo/outcome_reward": float(values("dtpo_outcome_reward").mean()),

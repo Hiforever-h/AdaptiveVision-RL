@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from .annotate import annotate_row, generation_config, validate_annotation
-from .common import answer_check, digest, pixel_box, validate_box
+from .common import answer_check, answer_score, digest, pixel_box, validate_box
 from .reward import geometry_reward
 
 
@@ -42,6 +42,15 @@ class AnnotationTests(unittest.TestCase):
         self.assertTrue(answer_check(" LEIGH  BARDUGO ", ["Leigh Bardugo"])["match"])
         for pred, gold in [("5", "15"), ("5%", "5"), ("5 kg", "5"), ("0.05", "5"), (".5", "5"), ("Friday or Sunday", "Friday")]:
             self.assertFalse(answer_check(pred, [gold])["match"])
+
+    def test_numeric_answers_receive_relative_partial_credit(self):
+        self.assertAlmostEqual(answer_score("42130", ["42138"]), 42130 / 42138)
+        self.assertEqual(answer_score("42,138", ["42138"]), 1.0)
+        self.assertEqual(answer_score("5%", ["5"]), 0.0)
+        self.assertEqual(answer_score("-5", ["5"]), 0.0)
+        self.assertEqual(answer_score("0", ["0.05"]), 0.0)
+        self.assertEqual(answer_score("Friday or Sunday", ["Friday"]), 0.0)
+        self.assertAlmostEqual(answer_score("12", ["100", "15"]), 12 / 15)
 
     def test_annotation_schema(self):
         valid = {"status": "localized", "reference_boxes": [[0, 0, 0.5, 0.5]], "answer_from_image": "5"}

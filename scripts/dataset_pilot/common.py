@@ -74,3 +74,25 @@ def answer_check(prediction: str, answers: list[str]) -> dict:
     if number is not None and any(number == numeric_value(a) for a in answers):
         return {"match": True, "method": "numeric_exact"}
     return {"match": False, "method": "unmatched_requires_review"}
+
+
+def answer_score(prediction: str, answers: list[str]) -> float:
+    """Exact answers score 1; close pure numbers receive relative partial credit.
+
+    Keep ``answer_check`` strict for correctness metrics and annotation filtering.
+    Non-numeric answers, numbers with units, and opposite signs get no partial
+    credit. The cap keeps an inexact number distinguishable from an exact match.
+    """
+    if answer_check(prediction, answers)["match"]:
+        return 1.0
+    predicted = numeric_value(prediction)
+    if predicted is None:
+        return 0.0
+    scores = []
+    for answer in answers:
+        expected = numeric_value(answer)
+        if expected is None or predicted * expected <= 0:
+            continue
+        relative_error = abs(predicted - expected) / max(abs(predicted), abs(expected))
+        scores.append(max(0.0, 1.0 - float(relative_error)))
+    return min(0.9999, max(scores, default=0.0))

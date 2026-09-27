@@ -28,9 +28,12 @@ python -m unittest discover -s tests -v
 
 ## 已实现的训练语义
 
+- 当前基座为 `Qwen/Qwen3-VL-4B-Thinking`。训练与评估共用模板适配：
+  `add_generation_prompt=True` 只预填 `<|im_start|>assistant\n`，由模型在
+  completion 中自行生成 `<think>`。
 - 第一轮输入低分辨率全图和问题，策略在直接输出 `<answer>...</answer>` 与
-  输出 `<tool_call>...</tool_call>` 请求高清局部图之间二选一。两种动作前都可以
-  可选地添加一个非空 `<think>...</think>`，但它不是合法动作的必需项。
+  输出 `<tool_call>...</tool_call>` 请求高清局部图之间二选一。两种动作都必须
+  以非空 `<think>...</think>` 开始；第二轮回答也必须如此。
 - 裁剪工具接收 Qwen-VL 原生的 0～1000 归一化 `xyxy` 坐标；环境按低清图
   尺寸换算后映射到原图执行裁剪，参考框与 Coverage+IoU 仍使用 0～1 坐标。
 - 合法裁剪请求会产生第二轮模型输出，第二轮不得再次调用工具。
@@ -40,12 +43,12 @@ python -m unittest discover -s tests -v
   - 唯一获取的视觉 token 数为 `low + crop`；
   - 两轮轨迹实际处理的视觉 token 数为 `low + (low + crop)`。
   两种口径都会记录。
-- Outcome Reward 为答案正确性、最高 0.5 的格式奖励和论文形式的 balance reward
-  之和。每个合法 action 的归一化格式分为 0.5，若它还包含非空且非占位符的
-  `<think>...</think>`，格式分提升到 1.0；直接回答的格式奖励为该分数乘 0.5，
-  两轮工具轨迹则先平均 tool call 与最终 answer 的格式分再乘 0.5。因此 `<think>`
-  仍是可选项，但在所有有效 turn 中提供真实内容才能取得满额格式奖励。Balance
-  penalty 从论文的 0.1 降为 0.01，阈值保持 0.2。
+- Outcome Reward 为答案分（数值接近可获部分分）、最高 0.5 的格式奖励和论文形式的 balance reward
+  之和。只有包含非空且非占位符 `<think>...</think>` 的合法 action 才获得
+  归一化格式分 1.0，否则为 0。直接回答的格式奖励为该分数乘 0.5，
+  两轮工具轨迹先平均 tool call 与最终 answer 的格式分再乘 0.5。
+  答案内容分与格式分仍分别计算。Balance penalty 从论文的 0.1 降为 0.01，
+  阈值保持 0.2。
 - PPO 使用论文的非对称裁剪范围：下界 0.20、上界 0.24；学习率为
   `1e-6`，不使用 KL，工具优势系数为 0.3。
 - Tool Reward 对所有候选参考框取
@@ -55,7 +58,7 @@ python -m unittest discover -s tests -v
 - PPO 分别对工具轮 token 和回答轮 token 做归一化。每个训练 step 生成
   64 条轨迹，展开后得到 64～128 个 turn row；不足 128 的部分使用零 loss
   padding 补齐。Padding 不参与奖励、优势、token 分母或训练指标。
-- 当前答案正确性采用项目已有的确定性精确匹配／数值匹配，不在训练期间调用在线
+- 准确率保留项目已有的确定性精确匹配；结果奖励对接近的纯数字另给相对相似度部分分，不在训练期间调用在线
   Judge 模型。
 
 ## A800 环境要求
@@ -262,6 +265,7 @@ bash scripts/run_dtpo_lora.sh \
 默认配置位于 `configs/dtpo_qwen3vl_4b_lora.yaml`。重要日志包括：
 
 - `dtpo/accuracy`；
+- `dtpo/answer_score`；
 - `dtpo/direct_answer_accuracy`；
 - `dtpo/tool_answer_accuracy`；
 - `dtpo/tool_call_rate`；

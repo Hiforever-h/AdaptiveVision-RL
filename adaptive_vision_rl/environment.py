@@ -9,9 +9,10 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
-from scripts.dataset_pilot.common import answer_check, pixel_box
+from scripts.dataset_pilot.common import answer_check, answer_score, pixel_box
 from scripts.dataset_pilot.reward import geometry_reward
 
+from .answer_reward import encode_answer_reward
 from .prompts import INITIAL_PROMPT, SECOND_PROMPT
 from .protocol import ParsedAction, extract_answer_candidate, parse_action
 
@@ -138,21 +139,22 @@ class AdaptiveVisionEnvironmentManager:
 
     @staticmethod
     def _action_format_score(action: ParsedAction, expected_kind: str) -> float:
-        """Score a valid action structure and add a bonus for real reasoning."""
+        """Only a valid action with generated reasoning earns format credit."""
 
-        if not action.valid or action.kind != expected_kind:
+        if not action.valid or not action.has_think or action.kind != expected_kind:
             return 0.0
-        return 1.0 if action.has_think else 0.5
+        return 1.0
 
     @staticmethod
     def _score_answer(
         answer: str | None,
         references: list[str],
         action_format_scores: list[float],
-    ) -> tuple[float, float]:
+    ) -> tuple[float, float, float]:
         accuracy = float(answer is not None and answer_check(answer, references)["match"])
+        score = answer_score(answer, references) if answer is not None else 0.0
         mean_format_score = sum(action_format_scores) / len(action_format_scores)
-        return accuracy, 0.5 * mean_format_score
+        return accuracy, score, 0.5 * mean_format_score
 
     @staticmethod
     def _inactive_prompt(images: list[np.ndarray]) -> str:
@@ -254,12 +256,14 @@ class AdaptiveVisionEnvironmentManager:
                     continue
 
                 candidate = action.answer or extract_answer_candidate(text)
-                accuracy, format_reward = self._score_answer(
+                accuracy, score, format_reward = self._score_answer(
                     candidate,
                     state["answers"],
                     [self._action_format_score(action, "answer")],
                 )
-                rewards[index] = accuracy + format_reward
+                rewards[index] = encode_answer_reward(
+                    correct=bool(accuracy), score=score, format_reward=format_reward
+                )
                 state["done"] = True
                 dones[index] = True
                 next_texts.append(self._inactive_prompt(state["last_images"]))
@@ -270,6 +274,7 @@ class AdaptiveVisionEnvironmentManager:
                         "is_action_valid": action.valid and action.kind == "answer",
                         "tool_calling": 0,
                         "won": accuracy,
+                        "answer_score": score,
                         "format_reward": format_reward,
                         "parse_error": action.error,
                     }
@@ -282,7 +287,7 @@ class AdaptiveVisionEnvironmentManager:
                 image_size=(state["low_width"], state["low_height"]),
             )
             candidate = action.answer or extract_answer_candidate(text)
-            accuracy, format_reward = self._score_answer(
+            accuracy, score, format_reward = self._score_answer(
                 candidate,
                 state["answers"],
                 [
@@ -290,7 +295,9 @@ class AdaptiveVisionEnvironmentManager:
                     self._action_format_score(action, "answer"),
                 ],
             )
-            rewards[index] = accuracy + format_reward
+            rewards[index] = encode_answer_reward(
+                correct=bool(accuracy), score=score, format_reward=format_reward
+            )
             state["done"] = True
             dones[index] = True
             next_texts.append(self._inactive_prompt(state["last_images"]))
@@ -301,6 +308,7 @@ class AdaptiveVisionEnvironmentManager:
                     "is_action_valid": action.valid and action.kind == "answer",
                     "tool_calling": 0,
                     "won": accuracy,
+                    "answer_score": score,
                     "format_reward": format_reward,
                     "parse_error": action.error,
                 }

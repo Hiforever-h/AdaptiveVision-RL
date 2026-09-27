@@ -10,6 +10,8 @@ from agent_system.multi_turn_rollout.utils import process_image, torch_to_numpy
 from verl.utils.model import compute_position_id_with_mask
 import verl.utils.torch_functional as verl_F
 
+from adaptive_vision_rl.thinking_template import apply_thinking_chat_template
+
 
 class AdaptiveVisionTrajectoryCollector(TrajectoryCollector):
     """Allow the answer turn to contain both the low-res image and the crop."""
@@ -17,8 +19,6 @@ class AdaptiveVisionTrajectoryCollector(TrajectoryCollector):
     def preprocess_single_sample(self, item, gen_batch, obs):
         raw_prompt = gen_batch.non_tensor_batch["raw_prompt"][item]
         data_source = gen_batch.non_tensor_batch["data_source"][item]
-        apply_kwargs = self.config.data.get("apply_chat_template_kwargs", {})
-
         obs_texts = obs.get("text")
         obs_images = obs.get("image")
         obs_anchors = obs.get("anchor")
@@ -28,12 +28,7 @@ class AdaptiveVisionTrajectoryCollector(TrajectoryCollector):
         anchor = torch_to_numpy(obs_anchor, is_object=True) if isinstance(obs_anchor, torch.Tensor) else obs_anchor
 
         chat = np.array([{"content": obs_text or "", "role": "user"}])
-        prompt = self.tokenizer.apply_chat_template(
-            chat,
-            add_generation_prompt=True,
-            tokenize=False,
-            **apply_kwargs,
-        )
+        prompt = apply_thinking_chat_template(self.tokenizer, chat)
         row: dict = {}
         image_grid_thw = None
 

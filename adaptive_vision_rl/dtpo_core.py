@@ -23,6 +23,7 @@ class TrajectoryReward:
     outcome_reward: float = 0.0
     outcome_advantage: float = 0.0
     tool_advantage: float = 0.0
+    answer_score: float | None = None
 
 
 def _sample_standardize(values: list[float], epsilon: float) -> list[float]:
@@ -74,7 +75,9 @@ def assign_dtpo_rewards_and_advantages(
                     balance = -balance_penalty
                 elif direct_correct_ratio < balance_threshold:
                     balance = -balance_penalty
-            outcome = record.accuracy + record.format_reward + balance
+            outcome = (
+                record.answer_score if record.answer_score is not None else record.accuracy
+            ) + record.format_reward + balance
             rewarded.append(replace(record, balance_reward=balance, outcome_reward=outcome))
 
         outcome_advantages = _sample_standardize(
