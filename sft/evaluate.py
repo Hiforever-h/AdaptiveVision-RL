@@ -7,6 +7,7 @@ import argparse
 import json
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -20,11 +21,11 @@ def read_json(path: Path) -> dict[str, Any]:
 
 def run_evaluation(*, adapter: Path, split: str, output_dir: Path,
                    dataset_root: Path, model: str, overwrite: bool,
-                   batch_size: int) -> dict[str, Any]:
+                   batch_size: int, merged_model: Path | None = None) -> dict[str, Any]:
     command = [
         sys.executable, str(ROOT / "scripts/evaluate_dtpo.py"),
         "--checkpoint", str(adapter),
-        "--model", model,
+        "--model", str(merged_model) if merged_model is not None else model,
         "--dataset-root", str(dataset_root),
         "--split", split,
         "--output-dir", str(output_dir),
@@ -32,8 +33,25 @@ def run_evaluation(*, adapter: Path, split: str, output_dir: Path,
     ]
     if overwrite:
         command.append("--overwrite")
+    if merged_model is not None:
+        command.append("--merged-model")
     print(f"Evaluating {adapter} on {split}", flush=True)
-    subprocess.run(command, check=True, cwd=ROOT)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    log_path = output_dir / "evaluator.log"
+    with log_path.open("w", encoding="utf-8") as log:
+        with subprocess.Popen(
+            command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1,
+        ) as process:
+            assert process.stdout is not None
+            for line in process.stdout:
+                print(line, end="", flush=True)
+                log.write(line)
+            exit_code = process.wait()
+    if exit_code:
+        raise RuntimeError(
+            f"evaluation failed with exit code {exit_code}; the complete vLLM log is at {log_path}"
+        )
     summary = read_json(output_dir / "summary.json")
     expected = 300 if split == "val" else 500
     if summary["sample_count"] != expected or summary["split"] != split:
@@ -41,6 +59,30 @@ def run_evaluation(*, adapter: Path, split: str, output_dir: Path,
     if Path(summary["adapter_path"]).resolve() != adapter.resolve():
         raise RuntimeError(f"evaluation used an unexpected adapter in {output_dir}")
     return summary
+
+
+def evaluate_adapter(*, adapter: Path, split: str, output_dir: Path,
+                     dataset_root: Path, model: str, overwrite: bool,
+                     batch_size: int, dynamic_lora: bool,
+                     temporary_root: Path) -> dict[str, Any]:
+    common = dict(
+        adapter=adapter, split=split, output_dir=output_dir,
+        dataset_root=dataset_root, model=model,
+        overwrite=overwrite, batch_size=batch_size,
+    )
+    if dynamic_lora:
+        return run_evaluation(**common)
+    with tempfile.TemporaryDirectory(prefix="sft-merged-", dir=temporary_root) as temp:
+        merged = Path(temp) / "model"
+        command = [
+            sys.executable, "-m", "sft.merge_lora",
+            "--base-model", model,
+            "--adapter", str(adapter),
+            "--output-dir", str(merged),
+        ]
+        print(f"Temporarily merging {adapter} for vLLM evaluation", flush=True)
+        subprocess.run(command, check=True, cwd=ROOT)
+        return run_evaluation(**common, merged_model=merged)
 
 
 def main() -> None:
@@ -53,16 +95,32 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--test", action="store_true", help="test only the adapter selected on Val300")
+    parser.add_argument("--dynamic-lora", action="store_true",
+                        help="use vLLM dynamic LoRA instead of temporary merged models")
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
     config = read_json(args.config)
     root = (args.checkpoint_dir or Path(config["output_dir"])).expanduser().resolve()
+    if (root / "adapter_config.json").is_file():
+        raise ValueError(
+            f"--checkpoint-dir must be the training output directory containing "
+            f"checkpoint-70/ and final/, not the adapter directory {root}; "
+            f"use {root.parent}"
+        )
     output = (args.output_dir or root / "evaluation").expanduser().resolve()
     data_dir = (args.data_dir or Path(config.get("data_dir", "data"))).expanduser()
     if not data_dir.is_absolute():
         data_dir = ROOT / data_dir
     dataset_root = (args.dataset_root or data_dir / "visionthink_3000_300_500_balanced").expanduser().resolve()
     model = args.model or config["model"]
+    if Path(model).is_absolute():
+        model_dir = Path(model).expanduser()
+        if not (model_dir / "config.json").is_file():
+            raise FileNotFoundError(
+                f"--model must be a complete local model directory containing "
+                f"config.json: {model_dir}. To use the Hugging Face cache, pass "
+                f"--model Qwen/Qwen3-VL-4B-Thinking instead."
+            )
     if args.batch_size < 1:
         parser.error("--batch-size must be positive")
     effective = config["micro_batch_size"] * config["gradient_accumulation_steps"]
@@ -76,10 +134,11 @@ def main() -> None:
             raise FileNotFoundError(f"{name} adapter missing: {adapter}")
     output.mkdir(parents=True, exist_ok=True)
     val_results = {
-        name: run_evaluation(
+        name: evaluate_adapter(
             adapter=adapter, split="val", output_dir=output / f"val_{name}",
             dataset_root=dataset_root, model=model,
             overwrite=args.overwrite, batch_size=args.batch_size,
+            dynamic_lora=args.dynamic_lora, temporary_root=output,
         )
         for name, adapter in adapters.items()
     }
@@ -94,12 +153,14 @@ def main() -> None:
         "val_accuracy": accuracy,
         "selected": winner,
         "selected_adapter": str(adapters[winner]),
+        "evaluation_backend": "dynamic_lora" if args.dynamic_lora else "temporary_merged_model",
     }
     if args.test:
-        result = run_evaluation(
+        result = evaluate_adapter(
             adapter=adapters[winner], split="test", output_dir=output / "test_selected",
             dataset_root=dataset_root, model=model,
             overwrite=args.overwrite, batch_size=args.batch_size,
+            dynamic_lora=args.dynamic_lora, temporary_root=output,
         )
         selection["test_accuracy"] = float(result["metrics"]["overall"]["accuracy"])
     (output / "selection.json").write_text(

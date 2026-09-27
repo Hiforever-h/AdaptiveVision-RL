@@ -240,20 +240,21 @@ class VLLMEvaluator:
 
         from transformers import AutoProcessor
 
-        from adaptive_vision_rl.vllm_compat import (
-            install_qwen3vl_lora_mapping_backport,
-        )
-
-        install_qwen3vl_lora_mapping_backport()
         from vllm import LLM, SamplingParams
-        from vllm.lora.request import LoRARequest
+        rank = None
+        if not args.merged_model:
+            from adaptive_vision_rl.vllm_compat import (
+                install_qwen3vl_lora_mapping_backport,
+            )
+            from vllm.lora.request import LoRARequest
 
-        adapter_config = json.loads(
-            (adapter_path / "adapter_config.json").read_text(encoding="utf-8")
-        )
-        rank = int(adapter_config.get("r", 0))
-        if rank <= 0:
-            raise ValueError(f"invalid LoRA rank in {adapter_path / 'adapter_config.json'}")
+            install_qwen3vl_lora_mapping_backport()
+            adapter_config = json.loads(
+                (adapter_path / "adapter_config.json").read_text(encoding="utf-8")
+            )
+            rank = int(adapter_config.get("r", 0))
+            if rank <= 0:
+                raise ValueError(f"invalid LoRA rank in {adapter_path / 'adapter_config.json'}")
 
         self.processor = AutoProcessor.from_pretrained(
             args.model,
@@ -261,22 +262,22 @@ class VLLMEvaluator:
             use_fast=True,
         )
         configure_thinking_tokenizer(self.processor.tokenizer)
-        self.llm = LLM(
-            model=args.model,
-            tensor_parallel_size=1,
-            trust_remote_code=args.trust_remote_code,
-            dtype=args.dtype,
-            seed=args.seed,
-            gpu_memory_utilization=args.gpu_memory_utilization,
-            max_model_len=args.max_model_len,
-            max_num_batched_tokens=args.max_num_batched_tokens,
-            limit_mm_per_prompt={"image": 2},
-            enable_lora=True,
-            max_loras=1,
-            max_lora_rank=rank,
-            enforce_eager=True,
-            enable_chunked_prefill=False,
-        )
+        llm_kwargs = {
+            "model": args.model,
+            "tensor_parallel_size": 1,
+            "trust_remote_code": args.trust_remote_code,
+            "dtype": args.dtype,
+            "seed": args.seed,
+            "gpu_memory_utilization": args.gpu_memory_utilization,
+            "max_model_len": args.max_model_len,
+            "max_num_batched_tokens": args.max_num_batched_tokens,
+            "limit_mm_per_prompt": {"image": 2},
+            "enforce_eager": True,
+            "enable_chunked_prefill": False,
+        }
+        if not args.merged_model:
+            llm_kwargs.update(enable_lora=True, max_loras=1, max_lora_rank=rank)
+        self.llm = LLM(**llm_kwargs)
         self.sampling_params = SamplingParams(
             temperature=0.0,
             top_p=1.0,
@@ -284,7 +285,10 @@ class VLLMEvaluator:
             max_tokens=args.max_response_tokens,
             seed=args.seed,
         )
-        self.lora_request = LoRARequest("adaptive_vision_dtpo", 1, str(adapter_path))
+        self.lora_request = (
+            None if args.merged_model
+            else LoRARequest("adaptive_vision_dtpo", 1, str(adapter_path))
+        )
 
     def generate(
         self,
@@ -301,12 +305,10 @@ class VLLMEvaluator:
                     "multi_modal_data": {"image": list(image_group)},
                 }
             )
-        outputs = self.llm.generate(
-            requests,
-            sampling_params=self.sampling_params,
-            lora_request=self.lora_request,
-            use_tqdm=False,
-        )
+        generate_kwargs = {"sampling_params": self.sampling_params, "use_tqdm": False}
+        if self.lora_request is not None:
+            generate_kwargs["lora_request"] = self.lora_request
+        outputs = self.llm.generate(requests, **generate_kwargs)
         if len(outputs) != len(requests):
             raise RuntimeError("vLLM returned a different number of outputs than requests")
         return [output.outputs[0].text for output in outputs]
@@ -620,6 +622,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=20260922)
     parser.add_argument("--coverage-weight", type=float, default=0.5)
     parser.add_argument("--trust-remote-code", action="store_true")
+    parser.add_argument("--merged-model", action="store_true",
+                        help="--model is a full model with the checkpoint adapter merged in")
     parser.add_argument("--overwrite", action="store_true")
     return parser
 
@@ -637,6 +641,10 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--gpu-memory-utilization must be between 0 and 1")
     if not 0 < args.coverage_weight < 1:
         raise ValueError("--coverage-weight must be between 0 and 1")
+    if args.merged_model and not (Path(args.model).expanduser() / "config.json").is_file():
+        raise FileNotFoundError(
+            f"--merged-model requires --model to be a complete local model directory: {args.model}"
+        )
 
 
 def main() -> None:
@@ -685,6 +693,7 @@ def main() -> None:
         "schema_version": 1,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "model": args.model,
+        "merged_model": args.merged_model,
         "adapter_path": str(adapter_path),
         "adapter_sha256": file_sha256(adapter_path / "adapter_model.safetensors"),
         "dataset_root": str(args.dataset_root.expanduser().resolve()),
