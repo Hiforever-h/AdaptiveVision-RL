@@ -32,6 +32,10 @@ done
 export PYTHONPATH="${PROJECT_ROOT}:${VERL_AGENT_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 export TOKENIZERS_PARALLELISM=false
 export VLLM_USE_V1=1
+# The Qwen3-VL LoRA mapping backport is installed in the Ray actor before
+# rollout construction. Keep the V1 engine core in that process so it sees
+# the patched mapping during multimodal profiling.
+export VLLM_ENABLE_V1_MULTIPROCESSING=0
 if [[ ! "${OMP_NUM_THREADS:-}" =~ ^[1-9][0-9]*$ ]]; then
   export OMP_NUM_THREADS=1
 fi

@@ -4,7 +4,9 @@
 
 评测脚本对冻结的 500 条 Test 数据执行确定性两轮推理。它复用训练时的提示词、
 动作解析、裁剪坐标换算、答案精确准确率与数值相似度部分奖励、格式奖励和 Coverage+IoU 区域奖励口径，
-并直接用 vLLM 加载 verl-agent 保存的 LoRA adapter，无需先合并模型。
+并直接用 vLLM 加载 verl-agent 保存的 LoRA adapter，无需先合并模型。动态 LoRA
+评测会将 vLLM V1 EngineCore 留在当前进程，使 Qwen3-VL 模块映射补丁在模型加载
+和多模态 profiling 时都生效。
 
 ## 运行环境
 
@@ -54,6 +56,8 @@ python scripts/evaluate_dtpo.py \
 validation 保持一致：temperature 0、单条输出、最多 1024 个 response token。
 默认基座为 `Qwen/Qwen3-VL-4B-Thinking`，评估与训练使用同一模板适配，
 提示词只预填 assistant 前缀，由 completion 生成完整 `<think>...</think>`。
+如果 DTPO 从 SFT 合并模型开始训练，评测时必须通过 `--model` 指定同一个
+SFT 合并模型目录；否则会将 DTPO adapter 加到错误的基座上。
 
 ## 输出
 

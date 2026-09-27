@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic two-turn evaluation for a trained AdaptiveVision LoRA policy."""
+"""Deterministic two-turn evaluation for an AdaptiveVision model."""
 
 from __future__ import annotations
 
@@ -229,9 +229,13 @@ def execute_crop(
 
 
 class VLLMEvaluator:
-    def __init__(self, args: argparse.Namespace, adapter_path: Path):
+    def __init__(self, args: argparse.Namespace, adapter_path: Path | None):
         os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
         os.environ.setdefault("VLLM_USE_V1", "1")
+        if not (args.merged_model or args.base_model):
+            # The mapping backport below changes this process only. vLLM's
+            # default V1 EngineCore child would still see the broken mapping.
+            os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
         if not os.environ.get("OMP_NUM_THREADS", "").isdigit() or int(
             os.environ.get("OMP_NUM_THREADS", "0")
@@ -242,7 +246,7 @@ class VLLMEvaluator:
 
         from vllm import LLM, SamplingParams
         rank = None
-        if not args.merged_model:
+        if not (args.merged_model or args.base_model):
             from adaptive_vision_rl.vllm_compat import (
                 install_qwen3vl_lora_mapping_backport,
             )
@@ -275,7 +279,7 @@ class VLLMEvaluator:
             "enforce_eager": True,
             "enable_chunked_prefill": False,
         }
-        if not args.merged_model:
+        if not (args.merged_model or args.base_model):
             llm_kwargs.update(enable_lora=True, max_loras=1, max_lora_rank=rank)
         self.llm = LLM(**llm_kwargs)
         self.sampling_params = SamplingParams(
@@ -286,7 +290,7 @@ class VLLMEvaluator:
             seed=args.seed,
         )
         self.lora_request = (
-            None if args.merged_model
+            None if (args.merged_model or args.base_model)
             else LoRARequest("adaptive_vision_dtpo", 1, str(adapter_path))
         )
 
@@ -604,9 +608,10 @@ def write_jsonl(path: Path, rows: Sequence[dict[str, Any]]) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Evaluate the latest DTPO LoRA checkpoint on the frozen test split."
+        description="Evaluate a model on the frozen AdaptiveVision split."
     )
-    parser.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
+    parser.add_argument("--checkpoint", type=Path,
+                        help="LoRA checkpoint (defaults to the DTPO checkpoint)")
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--dataset-root", type=Path, default=DEFAULT_DATASET)
     parser.add_argument("--split", default="test")
@@ -622,8 +627,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=20260922)
     parser.add_argument("--coverage-weight", type=float, default=0.5)
     parser.add_argument("--trust-remote-code", action="store_true")
-    parser.add_argument("--merged-model", action="store_true",
-                        help="--model is a full model with the checkpoint adapter merged in")
+    model_mode = parser.add_mutually_exclusive_group()
+    model_mode.add_argument("--merged-model", action="store_true",
+                            help="--model is a full model with the checkpoint adapter merged in")
+    model_mode.add_argument("--base-model", action="store_true",
+                            help="evaluate --model directly without loading an adapter")
     parser.add_argument("--overwrite", action="store_true")
     return parser
 
@@ -641,6 +649,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--gpu-memory-utilization must be between 0 and 1")
     if not 0 < args.coverage_weight < 1:
         raise ValueError("--coverage-weight must be between 0 and 1")
+    if args.base_model and args.checkpoint is not None:
+        raise ValueError("--checkpoint cannot be used with --base-model")
     if args.merged_model and not (Path(args.model).expanduser() / "config.json").is_file():
         raise FileNotFoundError(
             f"--merged-model requires --model to be a complete local model directory: {args.model}"
@@ -650,7 +660,9 @@ def validate_args(args: argparse.Namespace) -> None:
 def main() -> None:
     args = build_parser().parse_args()
     validate_args(args)
-    adapter_path = resolve_lora_adapter(args.checkpoint)
+    adapter_path = None if args.base_model else resolve_lora_adapter(
+        args.checkpoint or DEFAULT_CHECKPOINT
+    )
     output_dir = args.output_dir.expanduser().resolve()
     results_path = output_dir / "predictions.jsonl"
     summary_path = output_dir / "summary.json"
@@ -666,7 +678,10 @@ def main() -> None:
         offset=args.offset,
         limit=args.limit,
     )
-    print(f"Resolved LoRA adapter: {adapter_path}", flush=True)
+    if adapter_path is None:
+        print(f"Evaluating base model: {args.model}", flush=True)
+    else:
+        print(f"Resolved LoRA adapter: {adapter_path}", flush=True)
     print(f"Evaluation samples: {len(samples)} from {annotation_path}", flush=True)
 
     evaluator = VLLMEvaluator(args, adapter_path)
@@ -693,9 +708,11 @@ def main() -> None:
         "schema_version": 1,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "model": args.model,
+        "base_model": args.base_model,
         "merged_model": args.merged_model,
-        "adapter_path": str(adapter_path),
-        "adapter_sha256": file_sha256(adapter_path / "adapter_model.safetensors"),
+        "adapter_path": str(adapter_path) if adapter_path is not None else None,
+        "adapter_sha256": file_sha256(adapter_path / "adapter_model.safetensors")
+        if adapter_path is not None else None,
         "dataset_root": str(args.dataset_root.expanduser().resolve()),
         "annotation_path": str(annotation_path),
         "annotation_sha256": file_sha256(annotation_path),

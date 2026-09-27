@@ -2,10 +2,13 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+import sys
 
 from PIL import Image
 
 from adaptive_vision_rl.protocol import parse_action
+from scripts import evaluate_dtpo
 from scripts.evaluate_dtpo import (
     EvalSample,
     _finalize_record,
@@ -18,6 +21,34 @@ from scripts.evaluate_dtpo import (
 
 
 class EvaluationTests(unittest.TestCase):
+    def test_base_model_evaluation_does_not_resolve_adapter(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            annotation = root / "annotations.jsonl"
+            annotation.write_text("{}\n")
+            output = root / "results"
+            argv = ["evaluate_dtpo.py", "--base-model", "--model", "base",
+                    "--output-dir", str(output)]
+            with patch.object(sys, "argv", argv), \
+                 patch.object(evaluate_dtpo, "validate_args"), \
+                 patch.object(evaluate_dtpo, "resolve_lora_adapter",
+                              side_effect=AssertionError("adapter lookup attempted")), \
+                 patch.object(evaluate_dtpo, "load_samples",
+                              return_value=([object()], annotation)), \
+                 patch.object(evaluate_dtpo, "VLLMEvaluator") as mock_evaluator, \
+                 patch.object(evaluate_dtpo, "evaluate_batch",
+                              return_value=([{}], 0.0)), \
+                 patch.object(evaluate_dtpo, "metric_block",
+                              return_value={"accuracy": 0.5}), \
+                 patch.object(evaluate_dtpo, "summarize",
+                              return_value={"overall": {"accuracy": 0.5}}):
+                evaluate_dtpo.main()
+            self.assertIsNone(mock_evaluator.call_args.args[1])
+            summary = json.loads((output / "summary.json").read_text())
+            self.assertTrue(summary["base_model"])
+            self.assertIsNone(summary["adapter_path"])
+            self.assertIsNone(summary["adapter_sha256"])
+
     def test_resolves_latest_verl_adapter(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

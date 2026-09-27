@@ -107,12 +107,18 @@ python -m pip install -r requirements.txt
 
 项目通过 `adaptive_vision_rl.verl_agent_hooks` 回移了 vLLM 0.11.2 对
 Qwen3-VL 多模态模块前缀的修复。该 hook 只在检测到 `vllm==0.11.0` 且原始
-错误映射仍存在时生效，使 rank 64、alpha 128 的 LoRA 只挂载到语言模型，
-避免视觉塔在 vLLM profiling 阶段错误进入 LoRA 路径。启动日志中应出现：
+错误映射仍存在时修改当前进程的映射；重复调用会识别已修复的映射，不会叠加。
+`scripts/run_dtpo_lora.sh` 设置 `VLLM_ENABLE_V1_MULTIPROCESSING=0`，让
+vLLM EngineCore 留在加载该 hook 的 Ray Actor 进程内，使 rank 64、alpha 128
+的 LoRA 不会因错误映射挂载到视觉塔。启动日志中应出现：
 
 ```text
 Applied the vLLM 0.11.2 Qwen3-VL LoRA mapping backport
 ```
+
+这只覆盖已知的映射问题；A800 上仍须运行下文的两步 GPU Smoke Test，检查
+vLLM 初始化、权重同步与完整训练 step。单独在父进程看到该日志不足以证明
+另起的 EngineCore 子进程也应用了补丁。
 
 ### 4. 单独安装 FlashAttention
 
@@ -199,6 +205,13 @@ bash scripts/run_dtpo_lora.sh \
   trainer.test_freq=-1 \
   trainer.save_freq=-1
 ```
+
+如果本次实验接在 SFT 后，应先将选定的 SFT LoRA checkpoint 合并导出为完整模型，
+再在 smoke test 和正式训练命令中都覆盖
+`actor_rollout_ref.model.path=/root/autodl-tmp/models/<SFT合并模型目录>`。
+默认配置中的 `Qwen/Qwen3-VL-4B-Thinking` 是原始基座，不会自动加载 SFT
+adapter。后续评测 DTPO adapter 时，`scripts/evaluate_dtpo.py --model` 也必须
+指向同一个 SFT 合并模型。
 
 Smoke test 需要重点确认：
 

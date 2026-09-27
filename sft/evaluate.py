@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare half/full adapters on Val300 by final-answer accuracy."""
+"""Evaluate the base model or compare SFT adapters by final-answer accuracy."""
 
 from __future__ import annotations
 
@@ -19,23 +19,26 @@ def read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def run_evaluation(*, adapter: Path, split: str, output_dir: Path,
+def run_evaluation(*, adapter: Path | None, split: str, output_dir: Path,
                    dataset_root: Path, model: str, overwrite: bool,
                    batch_size: int, merged_model: Path | None = None) -> dict[str, Any]:
     command = [
         sys.executable, str(ROOT / "scripts/evaluate_dtpo.py"),
-        "--checkpoint", str(adapter),
         "--model", str(merged_model) if merged_model is not None else model,
         "--dataset-root", str(dataset_root),
         "--split", split,
         "--output-dir", str(output_dir),
         "--batch-size", str(batch_size),
     ]
+    if adapter is None:
+        command.append("--base-model")
+    else:
+        command.extend(("--checkpoint", str(adapter)))
     if overwrite:
         command.append("--overwrite")
     if merged_model is not None:
         command.append("--merged-model")
-    print(f"Evaluating {adapter} on {split}", flush=True)
+    print(f"Evaluating {model if adapter is None else adapter} on {split}", flush=True)
     output_dir.mkdir(parents=True, exist_ok=True)
     log_path = output_dir / "evaluator.log"
     with log_path.open("w", encoding="utf-8") as log:
@@ -56,7 +59,10 @@ def run_evaluation(*, adapter: Path, split: str, output_dir: Path,
     expected = 300 if split == "val" else 500
     if summary["sample_count"] != expected or summary["split"] != split:
         raise RuntimeError(f"expected {expected} {split} samples in {output_dir}")
-    if Path(summary["adapter_path"]).resolve() != adapter.resolve():
+    if adapter is None:
+        if not summary.get("base_model") or summary.get("adapter_path") is not None:
+            raise RuntimeError(f"evaluation did not use the base model in {output_dir}")
+    elif Path(summary["adapter_path"]).resolve() != adapter.resolve():
         raise RuntimeError(f"evaluation used an unexpected adapter in {output_dir}")
     return summary
 
@@ -88,26 +94,33 @@ def evaluate_adapter(*, adapter: Path, split: str, output_dir: Path,
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint-dir", type=Path)
+    parser.add_argument("--base-model", action="store_true",
+                        help="evaluate the base model without an SFT checkpoint")
     parser.add_argument("--config", type=Path, default=ROOT / "sft/config.json")
     parser.add_argument("--model", help="Hub model ID or complete local model directory")
     parser.add_argument("--data-dir", type=Path, help="directory containing visionthink_3000_300_500_balanced/")
     parser.add_argument("--dataset-root", type=Path, help="override the Val/Test dataset directory")
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--test", action="store_true", help="test only the adapter selected on Val300")
+    parser.add_argument("--test", action="store_true",
+                        help="also evaluate Test500 (selected adapter or base model)")
     parser.add_argument("--dynamic-lora", action="store_true",
                         help="use vLLM dynamic LoRA instead of temporary merged models")
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
+    if args.base_model and args.checkpoint_dir is not None:
+        parser.error("--base-model cannot be combined with --checkpoint-dir")
+    if args.base_model and args.dynamic_lora:
+        parser.error("--base-model cannot be combined with --dynamic-lora")
     config = read_json(args.config)
     root = (args.checkpoint_dir or Path(config["output_dir"])).expanduser().resolve()
-    if (root / "adapter_config.json").is_file():
+    if not args.base_model and (root / "adapter_config.json").is_file():
         raise ValueError(
             f"--checkpoint-dir must be the training output directory containing "
             f"checkpoint-70/ and final/, not the adapter directory {root}; "
             f"use {root.parent}"
         )
-    output = (args.output_dir or root / "evaluation").expanduser().resolve()
+    output = (args.output_dir or root / ("evaluation_base" if args.base_model else "evaluation")).expanduser().resolve()
     data_dir = (args.data_dir or Path(config.get("data_dir", "data"))).expanduser()
     if not data_dir.is_absolute():
         data_dir = ROOT / data_dir
@@ -123,6 +136,30 @@ def main() -> None:
             )
     if args.batch_size < 1:
         parser.error("--batch-size must be positive")
+    if args.base_model:
+        output.mkdir(parents=True, exist_ok=True)
+        val_result = run_evaluation(
+            adapter=None, split="val", output_dir=output / "val_base",
+            dataset_root=dataset_root, model=model,
+            overwrite=args.overwrite, batch_size=args.batch_size,
+        )
+        result: dict[str, Any] = {
+            "model": model,
+            "evaluation_backend": "base_model",
+            "val_accuracy": float(val_result["metrics"]["overall"]["accuracy"]),
+        }
+        if args.test:
+            test_result = run_evaluation(
+                adapter=None, split="test", output_dir=output / "test_base",
+                dataset_root=dataset_root, model=model,
+                overwrite=args.overwrite, batch_size=args.batch_size,
+            )
+            result["test_accuracy"] = float(test_result["metrics"]["overall"]["accuracy"])
+        (output / "base_model.json").write_text(
+            json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
+        return
     effective = config["micro_batch_size"] * config["gradient_accumulation_steps"]
     half_step = round(2250 / (2 * effective))
     adapters = {

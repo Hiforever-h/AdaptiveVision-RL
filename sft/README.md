@@ -63,9 +63,21 @@ python -m sft.evaluate \
 
 `--checkpoint-dir` 指向包含 `checkpoint-70/` 和 `final/` 的训练输出**根目录**，不要指向其中的 `final/`。`HF_HUB_CACHE` 是缓存根目录，不能直接当作 `--model`。只有在某个本地模型目录确实包含 `config.json`、权重和处理器文件时，才把该目录传给 `--model`；否则使用 Hub ID，库会从已配置的缓存查找。
 
+只评测基座模型时使用 `--base-model`，不需要 `--checkpoint-dir` 或任何 LoRA 文件。默认评测 Val300；加 `--test` 还会评测 Test500：
+
+```bash
+python -m sft.evaluate \
+  --base-model \
+  --model /root/autodl-tmp/models/Qwen3-VL-4B-Thinking \
+  --data-dir /root/autodl-tmp/data \
+  --test
+```
+
+结果默认写在配置中 `output_dir` 下的 `evaluation_base/`，包含 `val_base/`、`test_base/` 和汇总文件 `base_model.json`。可用 `--output-dir` 改位置。重复运行同一路径时加 `--overwrite`。
+
 每次评测的完整输出会保存在相应目录的 `evaluator.log`；如果 vLLM 报 `Engine core initialization failed`，请查看日志中更早出现的第一条 `EngineCore` 或 `Worker` 异常，末尾的汇总错误本身无法定位原因。
 
-项目固定的 vLLM 0.11.0 在 Qwen3-VL 多模态 profiling 时可能因动态 LoRA 触发 `lora_shrink_op` 断言。`sft.evaluate` 默认逐个**临时合并** LoRA、用普通完整模型评测，评测结束后删除临时合并文件；原 adapter 与基座缓存不变。每次最多临时占用一份完整模型的磁盘空间，Val300 的两个 checkpoint 和 Test500 会依次处理。若使用已修复动态 LoRA 的 vLLM，可给 `sft.evaluate` 增加 `--dynamic-lora` 走原来的加载方式。
+项目固定的 vLLM 0.11.0 在 Qwen3-VL 多模态 profiling 时可能因动态 LoRA 触发 `lora_shrink_op` 断言。评测 SFT checkpoint 时，`sft.evaluate` 默认逐个**临时合并** LoRA、用普通完整模型评测，评测结束后删除临时合并文件；原 adapter 与基座缓存不变。每次最多临时占用一份完整模型的磁盘空间，Val300 的两个 checkpoint 和 Test500 会依次处理。`--base-model` 模式直接加载基座模型，不进行合并。若使用已修复动态 LoRA 的 vLLM，可给 SFT checkpoint 评测增加 `--dynamic-lora` 走原来的加载方式。
 
 如需使用另一份训练 JSONL，给训练脚本或一键脚本增加 `--turns /绝对路径/turns.jsonl`。如果 Val/Test 单独存放，再增加 `--dataset-root /绝对路径/visionthink_3000_300_500_balanced`。
 
