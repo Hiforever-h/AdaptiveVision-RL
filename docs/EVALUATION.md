@@ -1,5 +1,7 @@
 # DTPO 模型评测
 
+训练前检查 Thinking 基座的原始输出格式，见 [Thinking 基座输出格式检查](THINKING_FORMAT_PROBE.md)。
+
 评测脚本对冻结的 500 条 Test 数据执行确定性两轮推理。它复用训练时的提示词、
 动作解析、裁剪坐标换算、答案精确准确率与数值相似度部分奖励、格式奖励和 Coverage+IoU 区域奖励口径，
 并直接用 vLLM 加载 verl-agent 保存的 LoRA adapter，无需先合并模型。
