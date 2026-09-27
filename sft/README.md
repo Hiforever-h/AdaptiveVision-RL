@@ -71,4 +71,17 @@ python -m sft.evaluate \
 
 如果训练已完成、只需重跑评测，执行 `python -m sft.evaluate --test --overwrite`，并按需附上相同的 `--model`、`--data-dir`、`--checkpoint-dir`。如果首次训练遇到显存不足，可把 `sft/config.json` 中的 micro batch 改为 1、梯度累积改为 16，保持有效 batch 为 16。中断后可从半轮 checkpoint 恢复：`python -m sft.train --resume-from-checkpoint /root/autodl-tmp/checkpoints/qwen3vl_4b_sft_lora/checkpoint-70 --skip-preflight`，并传入原先使用的路径参数。
 
-当前目录负责 SFT 与 checkpoint 选择。后续 GRPO 需要另外把选中的 PEFT adapter 接入项目锁定版本的 verl-agent actor。
+## 合并并导出完整模型
+
+先查看 `evaluation/selection.json` 的 `selected_adapter`，然后把该目录传给合并脚本。例如选中整轮 checkpoint 时：
+
+```bash
+python -m sft.merge_lora \
+  --base-model Qwen/Qwen3-VL-4B-Thinking \
+  --adapter /root/autodl-tmp/checkpoints/qwen3vl_4b_sft_lora/final \
+  --output-dir /root/autodl-tmp/models/qwen3vl_4b_sft_merged
+```
+
+如果选中半轮 checkpoint，就把 `--adapter` 改为相同训练输出目录下的 `checkpoint-70`。`--base-model` 可换成训练时所用基座模型的完整本地目录，必须使用与训练时相同的基座权重。合并脚本默认在 CUDA 上以 BF16 加载，使用安全合并，然后导出完整的 safetensors 模型分片、配置文件和处理器；也可指定 `--dtype`、`--device cpu` 或 `--max-shard-size 5GB`。输出目录必须是尚不存在的新路径，不会覆盖已有文件。`merge_manifest.json` 记录输入来源与版本。
+
+合并后的目录可直接作为完整模型加载。导出的处理器保留基座模型原始 chat template；推理时应像项目评测器一样先调用 `configure_thinking_tokenizer`，让模型自行生成 `<think>`。原始 LoRA adapter 仍保留在训练输出目录。后续 GRPO 若要从 SFT 权重继续训练，还需单独配置项目锁定版本的 verl-agent actor。
