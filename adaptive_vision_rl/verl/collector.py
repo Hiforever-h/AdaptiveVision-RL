@@ -47,6 +47,11 @@ class AdaptiveVisionTrajectoryCollector(TrajectoryCollector):
             row["multi_modal_data"] = {"image": processed_images}
             image_inputs = self.processor.image_processor(processed_images, return_tensors="pt")
             image_grid_thw = image_inputs["image_grid_thw"]
+            if len(image_grid_thw) != len(processed_images):
+                raise ValueError(
+                    f"image processor returned {len(image_grid_thw)} grids for "
+                    f"{len(processed_images)} images"
+                )
             row["multi_modal_inputs"] = dict(image_inputs)
 
             merge_length = self.processor.image_processor.merge_size**2

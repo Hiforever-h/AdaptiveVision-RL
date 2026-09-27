@@ -12,7 +12,7 @@ from PIL import Image
 from scripts.dataset_pilot.common import answer_check, answer_score, pixel_box
 from scripts.dataset_pilot.reward import geometry_reward
 
-from .answer_reward import encode_answer_reward
+from .answer_reward import FORMAT_REWARD_MAX, encode_answer_reward
 from .prompts import INITIAL_PROMPT, SECOND_PROMPT
 from .protocol import ParsedAction, extract_answer_candidate, parse_action
 
@@ -154,7 +154,7 @@ class AdaptiveVisionEnvironmentManager:
         accuracy = float(answer is not None and answer_check(answer, references)["match"])
         score = answer_score(answer, references) if answer is not None else 0.0
         mean_format_score = sum(action_format_scores) / len(action_format_scores)
-        return accuracy, score, 0.5 * mean_format_score
+        return accuracy, score, FORMAT_REWARD_MAX * mean_format_score
 
     @staticmethod
     def _inactive_prompt(images: list[np.ndarray]) -> str:

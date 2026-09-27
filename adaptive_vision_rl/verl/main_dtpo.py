@@ -68,6 +68,30 @@ class DTPOTaskRunner:
             raise ValueError("the reproduced AdaptVision setup disables both KL paths")
         if config.actor_rollout_ref.rollout.multi_turn.enable:
             raise ValueError("built-in tool multi_turn must stay disabled; the environment owns both turns")
+        if config.env.max_steps != 2:
+            raise ValueError("DTPO expects exactly two environment steps")
+        actor = config.actor_rollout_ref.actor
+        if actor.use_dynamic_bsz:
+            raise ValueError("DTPO loss weights require fixed actor micro-batches")
+        if actor.policy_loss.get("loss_mode", "vanilla") != "vanilla":
+            raise ValueError("DTPO weighted policy loss requires vanilla PPO loss mode")
+        trajectory_count = int(config.data.train_batch_size) * int(config.env.rollout.n)
+        if int(actor.ppo_mini_batch_size) != 2 * trajectory_count:
+            raise ValueError(
+                "ppo_mini_batch_size must equal 2 * data.train_batch_size * "
+                "env.rollout.n so both DTPO token denominators span the full step"
+            )
+        micro_batch_size = int(actor.ppo_micro_batch_size_per_gpu)
+        if micro_batch_size < 1 or actor.ppo_mini_batch_size % micro_batch_size:
+            raise ValueError("actor micro-batch size must divide ppo_mini_batch_size")
+        log_prob_micro_batch_size = int(
+            config.actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu
+        )
+        if (
+            log_prob_micro_batch_size < 1
+            or actor.ppo_mini_batch_size % log_prob_micro_batch_size
+        ):
+            raise ValueError("rollout log-prob micro-batch size must divide ppo_mini_batch_size")
 
         local_path = copy_to_local(
             config.actor_rollout_ref.model.path,

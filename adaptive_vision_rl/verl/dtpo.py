@@ -9,6 +9,7 @@ import torch
 
 import verl.utils.torch_functional as verl_F
 
+from adaptive_vision_rl.answer_reward import FORMAT_REWARD_MAX
 from adaptive_vision_rl.dtpo_core import loss_weights_for_minibatch
 
 from .monitoring import install_monitoring_hooks
@@ -172,7 +173,7 @@ def compute_dtpo_metrics(batch) -> dict[str, float]:
     metrics = {
         "dtpo/accuracy": float(accuracy.mean()),
         "dtpo/answer_score": float(values("dtpo_answer_score").mean()),
-        "dtpo/format_compliance": float((values("dtpo_format_reward") / 0.5).mean()),
+        "dtpo/format_compliance": float((values("dtpo_format_reward") / FORMAT_REWARD_MAX).mean()),
         "dtpo/balance_reward": float(values("dtpo_balance_reward").mean()),
         "dtpo/outcome_reward": float(values("dtpo_outcome_reward").mean()),
         "dtpo/tool_call_rate": float(has_tool.mean()),
