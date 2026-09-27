@@ -5,12 +5,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
+
+# vLLM 0.11.0 defaults to fork. The processor and multimodal libraries can
+# initialize CUDA before EngineCore starts, so its subprocess must use spawn.
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+_omp_threads = os.environ.get("OMP_NUM_THREADS", "")
+if not _omp_threads.isdigit() or int(_omp_threads) <= 0:
+    os.environ["OMP_NUM_THREADS"] = "1"
 
 import pyarrow.parquet as pq
 from PIL import Image

@@ -15,6 +15,8 @@ python scripts/probe_thinking_format.py \
 脚本直接加载 `Qwen/Qwen3-VL-4B-Thinking` 基座，不加载 LoRA。默认使用
 temperature 0 和每轮最多 1024 个生成 token。它从 Val parquet 的 `env_kwargs`
 读取真实问题和图片路径；该文件的 `prompt` 列只是训练框架所需的占位文本。
+脚本为 vLLM 0.11.0 的 EngineCore 设置 `spawn` 启动方式，避免 CUDA 已在
+主进程初始化后再被 `fork`；无效的 `OMP_NUM_THREADS` 值会改为 `1`。
 
 首轮使用低清全图。模型给出合法工具调用时，脚本按其框裁剪原图，继续生成真实第二轮。
 若工具调用不足，脚本还会为最多 8 条带参考框的样本构造裁剪图，单独检查第二轮的

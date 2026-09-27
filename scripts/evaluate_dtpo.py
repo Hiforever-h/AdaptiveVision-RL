@@ -232,6 +232,7 @@ class VLLMEvaluator:
     def __init__(self, args: argparse.Namespace, adapter_path: Path):
         os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
         os.environ.setdefault("VLLM_USE_V1", "1")
+        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
         if not os.environ.get("OMP_NUM_THREADS", "").isdigit() or int(
             os.environ.get("OMP_NUM_THREADS", "0")
         ) <= 0:
