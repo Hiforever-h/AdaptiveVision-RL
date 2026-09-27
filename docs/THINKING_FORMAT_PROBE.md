@@ -35,3 +35,8 @@ temperature 0 和每轮最多 1024 个生成 token。它从 Val parquet 的 `env
 工具 JSON 是否无效，或生成是否因长度截断；仍可通过
 `reference_second_turn` 检查第二轮格式。复测可换一个 `--output-dir`，
 或显式添加 `--overwrite`。之后可用 `--temperature 1.0` 再检查训练采样条件下的格式稳定性。
+
+若要重点检查工具调用，可用 `--source-use-tool true --limit 32` 选择原数据中
+带工具提示的 Val 样本，并换一个输出目录。`source_use_tool` 只是原数据的弱提示，
+不能当作“必须调用工具”的正确标签。汇总中会分别列出这一提示为 true 和 false
+时的首轮格式与动作统计；参考框构造的第二轮也优先选提示为 true 的样本。

@@ -75,12 +75,18 @@ def load_val_samples(
     *,
     offset: int,
     limit: int | None,
+    source_use_tool: bool | None = None,
 ) -> list[ProbeSample]:
     """Use env_kwargs; the parquet prompt is only a training placeholder."""
 
     parquet_path = parquet_path.expanduser().resolve()
     dataset_root = dataset_root.expanduser().resolve()
     rows = pq.read_table(parquet_path, columns=["env_kwargs"]).to_pylist()
+    if source_use_tool is not None:
+        rows = [
+            row for row in rows
+            if bool(row["env_kwargs"].get("source_use_tool", False)) == source_use_tool
+        ]
     selected = rows[offset : None if limit is None else offset + limit]
     if not selected:
         raise ValueError("The selected Val parquet slice is empty")
@@ -273,7 +279,9 @@ def run_probe(
 
     reference_tasks: list[tuple[dict, list[Image.Image]]] = []
     if reference_second_probes:
-        for record in records:
+        # Prioritize the source's tool-use hint when checking the answer turn.
+        # The hint is only a sampling aid, not a ground-truth tool decision.
+        for record in sorted(records, key=lambda item: not item["source_use_tool"]):
             if len(reference_tasks) >= reference_second_probes:
                 break
             sample = samples_by_id[record["sample_id"]]
@@ -311,6 +319,14 @@ def turn_summary(turns: Sequence[dict[str, Any]]) -> dict[str, Any]:
 def summarize(records: Sequence[dict[str, Any]]) -> dict[str, Any]:
     return {
         "first_turn": turn_summary([record["first_turn"] for record in records]),
+        "first_turn_by_source_use_tool": {
+            "false": turn_summary(
+                [record["first_turn"] for record in records if not record["source_use_tool"]]
+            ),
+            "true": turn_summary(
+                [record["first_turn"] for record in records if record["source_use_tool"]]
+            ),
+        },
         "natural_second_turn": turn_summary(
             [record["natural_second_turn"] for record in records if record["natural_second_turn"]]
         ),
@@ -332,6 +348,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--offset", type=int, default=0)
     parser.add_argument("--limit", type=int, default=32)
+    parser.add_argument("--source-use-tool", choices=["all", "true", "false"], default="all")
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--reference-second-probes", type=int, default=8)
     parser.add_argument("--max-response-tokens", type=int, default=1024)
@@ -366,8 +383,13 @@ def main() -> None:
     summary_path = output_dir / "summary.json"
     if not args.overwrite and (records_path.exists() or summary_path.exists()):
         raise FileExistsError(f"Probe output exists in {output_dir}; use --overwrite")
+    source_filter = None if args.source_use_tool == "all" else args.source_use_tool == "true"
     samples = load_val_samples(
-        args.val_parquet, args.dataset_root, offset=args.offset, limit=args.limit
+        args.val_parquet,
+        args.dataset_root,
+        offset=args.offset,
+        limit=args.limit,
+        source_use_tool=source_filter,
     )
     generator = BaseThinkingGenerator(args)
     started = time.perf_counter()
@@ -381,6 +403,7 @@ def main() -> None:
         "model": args.model,
         "val_parquet": str(args.val_parquet.expanduser().resolve()),
         "dataset_root": str(args.dataset_root.expanduser().resolve()),
+        "source_use_tool_filter": args.source_use_tool,
         "assistant_prompt_suffix": ASSISTANT_PREFIX,
         "think_token_id": generator.think_token_id,
         "sampling": {

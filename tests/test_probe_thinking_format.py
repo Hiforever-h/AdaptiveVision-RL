@@ -93,6 +93,8 @@ class ThinkingFormatProbeTests(unittest.TestCase):
         self.assertIsNone(records[1]["reference_second_turn"])
         metrics = summarize(records)
         self.assertEqual(metrics["first_turn"]["valid_action_rate"], 0.5)
+        self.assertEqual(metrics["first_turn_by_source_use_tool"]["false"]["count"], 1)
+        self.assertEqual(metrics["first_turn_by_source_use_tool"]["true"]["count"], 1)
         self.assertEqual(metrics["natural_second_turn"]["valid_action_rate"], 1.0)
         self.assertEqual(metrics["reference_second_turn"]["valid_action_rate"], 1.0)
 
