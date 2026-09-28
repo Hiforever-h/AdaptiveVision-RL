@@ -54,6 +54,7 @@ class DTPOTaskRunner:
         from adaptive_vision_rl.environment import make_adaptive_vision_envs
         from adaptive_vision_rl.thinking_template import configure_thinking_tokenizer
         from adaptive_vision_rl.verl.collector import AdaptiveVisionTrajectoryCollector
+        from adaptive_vision_rl.verl.checkpoints import install_checkpoint_retention
         from adaptive_vision_rl.verl.dtpo import install_driver_hooks
         from adaptive_vision_rl.verl.reward_manager import AdaptiveVisionRewardManager
 
@@ -171,6 +172,12 @@ class DTPOTaskRunner:
             val_envs=val_envs,
         )
         trainer.init_workers()
+
+        install_checkpoint_retention(
+            trainer,
+            Path(config.trainer.default_local_dir),
+            keep=int(config.trainer.max_actor_ckpt_to_keep),
+        )
 
         # verl-agent's actor only selects loss_mask when this metadata switch is on.
         # It is enabled after trainer validation so the built-in tool engine remains off.

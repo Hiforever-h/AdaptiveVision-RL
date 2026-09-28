@@ -87,6 +87,14 @@ class EnvironmentTests(unittest.TestCase):
         self.assertEqual(infos[0]["won"], 0.0)
         self.assertAlmostEqual(infos[0]["answer_score"], score, places=5)
 
+    def test_extreme_numeric_answer_does_not_interrupt_step(self):
+        self.environment.reset([{**self.row, "answers": ["2e999999"]}])
+        _, _, dones, infos = self.environment.step(
+            ["<think>estimate</think><answer>1e999999</answer>"]
+        )
+        self.assertTrue(dones[0])
+        self.assertEqual(infos[0]["answer_score"], 0.5)
+
     def test_tool_reward_is_on_first_turn_and_second_turn_sees_two_images(self):
         observations, _ = self.environment.reset([self.row])
         self.assertEqual(len(observations["image"][0]), 1)
@@ -140,6 +148,30 @@ class EnvironmentTests(unittest.TestCase):
         self.assertTrue(np.array_equal(observations["image"][0][1], full[1:3, 2:6]))
         self.assertEqual(observations["text"][0].count("<image>"), 2)
         self.assertIn(row["question"], observations["text"][0])
+
+    def test_extremely_thin_crop_is_padded_for_vision_processor(self):
+        root = Path(self.temporary.name)
+        full = np.full((400, 4, 3), 255, dtype=np.uint8)
+        Image.fromarray(full).save(root / "train/images/thin.png")
+        Image.fromarray(full).save(root / "train/lowres/thin.png")
+        row = {
+            **self.row,
+            "image_path": "train/images/thin.png",
+            "lowres_path": "train/lowres/thin.png",
+            "tool_reward_eligible": False,
+        }
+        self.environment.reset([row])
+        observations, _, _, infos = self.environment.step(
+            [
+                '<think>crop</think><tool_call>{"name":"request_local_region",'
+                '"arguments":{"bbox_2d":[0,0,250,1000]}}</tool_call>'
+            ]
+        )
+        crop = observations["image"][0][1]
+        self.assertEqual(infos[0]["predicted_box"], [0.0, 0.0, 0.25, 1.0])
+        self.assertEqual(crop.shape, (400, 4, 3))
+        self.assertTrue(np.all(crop[:, :1] == 0))
+        self.assertTrue(np.all(crop[:, 1:2] == 255))
 
     def test_tool_trajectory_averages_format_over_both_turns(self):
         self.environment.reset([self.row])

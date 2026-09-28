@@ -11,6 +11,7 @@ from verl.utils.model import compute_position_id_with_mask
 import verl.utils.torch_functional as verl_F
 
 from adaptive_vision_rl.thinking_template import apply_thinking_chat_template
+from .image_budget import fit_image_prompt
 
 
 class AdaptiveVisionTrajectoryCollector(TrajectoryCollector):
@@ -34,36 +35,46 @@ class AdaptiveVisionTrajectoryCollector(TrajectoryCollector):
 
         if obs_image is not None:
             images = obs_image if isinstance(obs_image, (list, tuple)) else [obs_image]
-            processed_images = [process_image(image) for image in images]
-            if prompt.count("<image>") != len(processed_images):
-                raise ValueError(
-                    f"prompt/image mismatch: {prompt.count('<image>')} placeholders for "
-                    f"{len(processed_images)} images"
+            try:
+                fitted = fit_image_prompt(
+                    prompt=prompt,
+                    images=images,
+                    tokenizer=self.tokenizer,
+                    processor=self.processor,
+                    max_prompt_length=int(self.config.data.max_prompt_length),
+                    process_image=process_image,
                 )
+            except ValueError as exc:
+                sample_id = anchor.get("sample_id", "?") if isinstance(anchor, dict) else "?"
+                stage = anchor.get("stage", "?") if isinstance(anchor, dict) else "?"
+                raise ValueError(f"sample_id={sample_id} stage={stage}: {exc}") from exc
+            processed_images = fitted.images
 
             raw_prompt = prompt.replace(
                 "<image>", "<|vision_start|><|image_pad|><|vision_end|>"
             )
             row["multi_modal_data"] = {"image": processed_images}
-            image_inputs = self.processor.image_processor(processed_images, return_tensors="pt")
-            image_grid_thw = image_inputs["image_grid_thw"]
-            if len(image_grid_thw) != len(processed_images):
-                raise ValueError(
-                    f"image processor returned {len(image_grid_thw)} grids for "
-                    f"{len(processed_images)} images"
-                )
+            image_inputs = fitted.image_inputs
+            image_grid_thw = fitted.image_grid_thw
             row["multi_modal_inputs"] = dict(image_inputs)
-
-            merge_length = self.processor.image_processor.merge_size**2
-            expanded_prompt = prompt
-            for grid in image_grid_thw:
-                replacement = (
-                    "<|vision_start|>"
-                    + "<|placeholder|>" * int(grid.prod().item() // merge_length)
-                    + "<|vision_end|>"
+            prompt = fitted.expanded_prompt
+            if isinstance(anchor, dict):
+                anchor = dict(anchor)
+                anchor["vision_tokens_step_processed"] = sum(fitted.vision_tokens)
+                if anchor.get("stage") == "decision":
+                    anchor["vision_tokens_low"] = fitted.vision_tokens[0]
+                elif anchor.get("stage") == "answer_after_tool":
+                    anchor["vision_tokens_low"] = fitted.vision_tokens[0]
+                    anchor["vision_tokens_crop"] = fitted.vision_tokens[1]
+            if fitted.initial_prompt_length > fitted.prompt_length:
+                print(
+                    "Resized overlong multimodal prompt: "
+                    f"sample_id={anchor.get('sample_id') if isinstance(anchor, dict) else '?'} "
+                    f"stage={anchor.get('stage') if isinstance(anchor, dict) else '?'} "
+                    f"tokens={fitted.initial_prompt_length}->{fitted.prompt_length} "
+                    f"image_sizes={[image.size for image in processed_images]}",
+                    flush=True,
                 )
-                expanded_prompt = expanded_prompt.replace("<image>", replacement, 1)
-            prompt = expanded_prompt.replace("<|placeholder|>", self.processor.image_token)
         else:
             raw_prompt = prompt
 

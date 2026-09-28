@@ -99,6 +99,26 @@ class ProtocolTests(unittest.TestCase):
             ).valid
         )
 
+    def test_oversized_tool_coordinate_is_invalid(self):
+        oversized = "9" * 1000
+        text = (
+            '<think>crop</think><tool_call>{"name":"request_local_region",'
+            '"arguments":{"bbox_2d":[' + oversized + ',0,1000,1000]}}</tool_call>'
+        )
+        self.assertFalse(parse_action(text, allow_tool=True, image_size=(400, 300)).valid)
+
+    def test_tool_json_integer_limit_is_invalid(self):
+        oversized = "9" * 5000
+        text = (
+            '<think>crop</think><tool_call>{"name":"request_local_region",'
+            '"arguments":{"bbox_2d":[' + oversized + ',0,1000,1000]}}</tool_call>'
+        )
+        self.assertFalse(parse_action(text, allow_tool=True, image_size=(400, 300)).valid)
+
+    def test_deeply_nested_tool_json_is_invalid(self):
+        text = "<think>crop</think><tool_call>" + "[" * 1200 + "0" + "]" * 1200 + "</tool_call>"
+        self.assertFalse(parse_action(text, allow_tool=True, image_size=(400, 300)).valid)
+
     def test_answer_accuracy_can_be_decoupled_from_format(self):
         malformed = r"prefix <answer>\boxed{42}</answer>"
         self.assertFalse(

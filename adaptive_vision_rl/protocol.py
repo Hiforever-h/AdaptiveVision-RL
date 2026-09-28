@@ -115,8 +115,8 @@ def parse_action(text: str, *, allow_tool: bool, image_size: tuple[int, int]) ->
 
     try:
         payload = json.loads(tool.group("call"))
-    except json.JSONDecodeError as exc:
-        return ParsedAction("invalid", False, error=f"invalid tool JSON: {exc.msg}")
+    except (json.JSONDecodeError, ValueError, RecursionError) as exc:
+        return ParsedAction("invalid", False, error=f"invalid tool JSON: {exc}")
 
     if not isinstance(payload, dict) or payload.get("name") != "request_local_region":
         return ParsedAction("invalid", False, error="unexpected tool name")
@@ -129,7 +129,10 @@ def parse_action(text: str, *, allow_tool: bool, image_size: tuple[int, int]) ->
     if any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in bbox):
         return ParsedAction("invalid", False, error="bbox coordinates must be numeric")
 
-    x1, y1, x2, y2 = (float(value) for value in bbox)
+    try:
+        x1, y1, x2, y2 = (float(value) for value in bbox)
+    except (OverflowError, ValueError):
+        return ParsedAction("invalid", False, error="bbox coordinates are out of range")
     if not (0 <= x1 < x2 <= 1000 and 0 <= y1 < y2 <= 1000):
         return ParsedAction("invalid", False, error="bbox is outside the 0-1000 coordinate space")
     width, height = image_size

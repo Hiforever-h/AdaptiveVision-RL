@@ -15,6 +15,7 @@ from scripts.dataset_pilot.reward import geometry_reward
 from .answer_reward import FORMAT_REWARD_MAX, encode_answer_reward
 from .prompts import INITIAL_PROMPT, SECOND_PROMPT
 from .protocol import ParsedAction, extract_answer_candidate, parse_action
+from .verl.image_budget import pad_thin_crop
 
 
 class AdaptiveVisionEnvironmentManager:
@@ -174,7 +175,7 @@ class AdaptiveVisionEnvironmentManager:
         with Image.open(state["image_path_resolved"]) as original:
             original = original.convert("RGB")
             crop_box = pixel_box(normalized, original.width, original.height)
-            crop = np.asarray(original.crop(tuple(crop_box)))
+            crop = np.asarray(pad_thin_crop(original.crop(tuple(crop_box))))
             executed = [
                 crop_box[0] / original.width,
                 crop_box[1] / original.height,

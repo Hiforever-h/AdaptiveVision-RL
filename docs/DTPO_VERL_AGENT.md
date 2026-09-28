@@ -223,6 +223,20 @@ bash scripts/run_dtpo_lora.sh \
 如需切换其他 SFT 合并模型，可同时覆盖训练的
 `actor_rollout_ref.model.path=...` 与评测的 `--model ...`。
 
+工具调用后的第二轮会同时输入低清图和裁剪图。少数高分辨率样本可能使展开后的
+视觉 token 超过 `data.max_prompt_length=8192`；collector 会仅对超限的观测
+逐步缩小图片，并用处理后的同一组图片构造 vLLM 输入、actor 图像张量和视觉
+token 统计。日志中的 `Resized overlong multimodal prompt` 会记录样本、轮次、
+缩放前后 token 数和图片尺寸。`max_response_length=1024` 使总序列上限为 9216；
+vLLM 的 `max_num_batched_tokens=10240` 覆盖这个长度。保留
+`data.truncation=error`，避免截断视觉 token。
+同步代码到 A800 后，可先运行
+`python scripts/check_dtpo_image_budget.py --scan-data`，用实际 Qwen3-VL
+processor 检查一张／两张大图、极细裁剪图，以及训练／验证数据中最长的两轮文本。
+此检查无需启动 GPU 训练。只有图片超限时会缩图；若文本加两张最小图片仍超限，
+collector 仍会报错，以免视觉 token 被截断。极细工具裁剪会补黑边至纵横比不超过
+100，实际裁剪坐标和几何奖励保持原值。
+
 Smoke test 需要重点确认：
 
 - vLLM 能接收第二轮的两张图片；
@@ -237,15 +251,24 @@ Smoke test 需要重点确认：
 bash scripts/run_dtpo_lora.sh
 ```
 
-默认每 250 个训练 step 保存一次可恢复训练的 checkpoint，并只保留最近 1 个：
+默认每 20 个训练 step 保存一次可恢复训练的 checkpoint，并只保留最近 1 个：
 
 ```yaml
 trainer:
-  save_freq: 250
+  save_freq: 20
   max_actor_ckpt_to_keep: 1
 ```
 
-最后一个训练 step 无论能否被 250 整除都会保存。输出目录由
+本项目在成功保存和恢复后还会清理旧 `global_step_*` 目录，以免 verl-agent 在
+进程重启后遗留多余 checkpoint。checkpoint 含完整 FP32 actor 状态、
+LoRA 的 AdamW 状态、adapter、数据加载器状态和配置；预计约 19～22 GB／个。
+断点续训后首次保存前也会先删除旧 checkpoint，以免短时占用两份空间。
+如果新 checkpoint 保存失败，这段时间内将无法从旧 checkpoint 恢复；需要从
+SFT 合并模型重新开始训练。
+首次保存后用 `du -sh /root/autodl-tmp/checkpoints/qwen3vl_4b_dtpo_lora/global_step_*`
+核对实际大小。
+
+最后一个训练 step 无论能否被 20 整除都会保存。输出目录由
 `trainer.default_local_dir` 控制。当前默认训练输出均写到 AutoDL 数据盘：
 
 ```text
@@ -253,6 +276,10 @@ trainer:
 /root/autodl-tmp/outputs/rollouts/qwen3vl_4b_dtpo_lora  # rollout JSONL
 /root/autodl-tmp/wandb  # WandB 本地日志
 ```
+
+中断后先检查输出目录下的 `latest_checkpointed_iteration.txt`。存在时保留同一
+`trainer.default_local_dir` 并使用 `trainer.resume_mode=auto`；不存在时只能从
+第 0 步重启，rollout JSONL 和 WandB 日志不能恢复模型或优化器状态。
 
 默认 WandB project 为 `adaptive_vision_rl`，run name 为
 `qwen3vl_4b_dtpo_lora`。可在启动时覆盖，例如：

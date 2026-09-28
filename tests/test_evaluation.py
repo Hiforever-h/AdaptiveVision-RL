@@ -194,11 +194,13 @@ class EvaluationTests(unittest.TestCase):
 
             def generate(self, texts, images):
                 if all(len(group) == 1 for group in images):
+                    self.last_image_token_counts = [[11], [12]]
                     return [
                         "<think>The answer is visible.</think><answer>42</answer>",
                         '<think>I need a crop.</think><tool_call>{"name":"request_local_region","arguments":'
                         '{"bbox_2d":[0,0,500,500]}}</tool_call>',
                     ]
+                self.last_image_token_counts = [[13, 14]]
                 return ["<think>The crop shows 42.</think><answer>42</answer>"]
 
         with tempfile.TemporaryDirectory() as directory:
@@ -230,6 +232,9 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual([record["format_compliance"] for record in records], [1.0, 1.0])
         self.assertEqual(records[1]["predicted_box"], [0.0, 0.0, 0.5, 0.5])
         self.assertEqual(records[1]["tool_reward"], 1.0)
+        self.assertEqual(records[1]["vision_tokens_low"], 12)
+        self.assertEqual(records[1]["vision_tokens_crop"], 14)
+        self.assertEqual(records[1]["vision_tokens_processed"], 39)
 
 
 if __name__ == "__main__":

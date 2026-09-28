@@ -23,6 +23,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from adaptive_vision_rl.answer_reward import FORMAT_REWARD_MAX
+from adaptive_vision_rl.verl.image_budget import fit_image_prompt, pad_thin_crop
 from adaptive_vision_rl.prompts import INITIAL_PROMPT, SECOND_PROMPT
 from adaptive_vision_rl.protocol import ParsedAction, extract_answer_candidate, parse_action
 from adaptive_vision_rl.thinking_template import (
@@ -219,7 +220,7 @@ def execute_crop(
         bbox[3] / low_height,
     ]
     crop_coordinates = pixel_box(normalized, full_image.width, full_image.height)
-    crop = full_image.crop(tuple(crop_coordinates))
+    crop = pad_thin_crop(full_image.crop(tuple(crop_coordinates)))
     executed = [
         crop_coordinates[0] / full_image.width,
         crop_coordinates[1] / full_image.height,
@@ -267,6 +268,9 @@ class VLLMEvaluator:
             use_fast=True,
         )
         configure_thinking_tokenizer(self.processor.tokenizer)
+        self.max_prompt_length = args.max_model_len - args.max_response_tokens
+        if self.max_prompt_length <= 0:
+            raise ValueError("--max-model-len must exceed --max-response-tokens")
         llm_kwargs = {
             "model": args.model,
             "tensor_parallel_size": 1,
@@ -303,13 +307,26 @@ class VLLMEvaluator:
         if len(texts) != len(images):
             raise ValueError("text and image batch sizes differ")
         requests = []
+        self.last_image_token_counts = []
         for text, image_group in zip(texts, images, strict=True):
+            chat_prompt = apply_thinking_chat_template(
+                self.processor.tokenizer, [{"role": "user", "content": text}]
+            )
+            fitted = fit_image_prompt(
+                prompt=chat_prompt,
+                images=image_group,
+                tokenizer=self.processor.tokenizer,
+                processor=self.processor,
+                max_prompt_length=self.max_prompt_length,
+                process_image=prepare_image,
+            )
             requests.append(
                 {
                     "prompt": render_prompt(self.processor, text, len(image_group)),
-                    "multi_modal_data": {"image": list(image_group)},
+                    "multi_modal_data": {"image": fitted.images},
                 }
             )
+            self.last_image_token_counts.append(fitted.vision_tokens)
         generate_kwargs = {"sampling_params": self.sampling_params, "use_tqdm": False}
         if self.lora_request is not None:
             generate_kwargs["lora_request"] = self.lora_request
@@ -438,11 +455,10 @@ def _finalize_record(
     )
     score = answer_score(prediction, sample.answers) if prediction is not None else 0.0
     acquired = state["vision_tokens_low"] + state["vision_tokens_crop"]
-    processed = (
-        state["vision_tokens_low"]
-        if not state["used_tool"]
-        else 2 * state["vision_tokens_low"] + state["vision_tokens_crop"]
-    )
+    processed = state["vision_tokens_low"]
+    if state["used_tool"]:
+        processed += state.get("vision_tokens_low_second", state["vision_tokens_low"])
+        processed += state["vision_tokens_crop"]
     full_tokens = state["vision_tokens_full"]
     return {
         "sample_id": sample.sample_id,
@@ -522,6 +538,10 @@ def evaluate_batch(
 
     started = time.perf_counter()
     first_responses = evaluator.generate(first_prompts, first_images)
+    first_counts = getattr(evaluator, "last_image_token_counts", None)
+    if first_counts is not None:
+        for state, counts in zip(states, first_counts, strict=True):
+            state["vision_tokens_low"] = counts[0]
     first_seconds = time.perf_counter() - started
     first_per_sample = first_seconds / len(states)
 
@@ -573,6 +593,11 @@ def evaluate_batch(
     if tool_states:
         started = time.perf_counter()
         second_responses = evaluator.generate(second_prompts, second_images)
+        second_counts = getattr(evaluator, "last_image_token_counts", None)
+        if second_counts is not None:
+            for state, counts in zip(tool_states, second_counts, strict=True):
+                state["vision_tokens_low_second"] = counts[0]
+                state["vision_tokens_crop"] = counts[1]
         second_seconds = time.perf_counter() - started
     second_per_sample = second_seconds / len(tool_states) if tool_states else 0.0
     response_by_sample = {
@@ -621,8 +646,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--offset", type=int, default=0)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--max-response-tokens", type=int, default=1024)
-    parser.add_argument("--max-model-len", type=int, default=7168)
-    parser.add_argument("--max-num-batched-tokens", type=int, default=8192)
+    parser.add_argument("--max-model-len", type=int, default=9216)
+    parser.add_argument("--max-num-batched-tokens", type=int, default=10240)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.80)
     parser.add_argument("--dtype", default="bfloat16")
     parser.add_argument("--seed", type=int, default=20260922)

@@ -3,7 +3,7 @@ import json
 import math
 import re
 import unicodedata
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, DecimalException, InvalidOperation
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -91,8 +91,13 @@ def answer_score(prediction: str, answers: list[str]) -> float:
     scores = []
     for answer in answers:
         expected = numeric_value(answer)
-        if expected is None or predicted * expected <= 0:
+        if expected is None or predicted.is_signed() != expected.is_signed():
             continue
-        relative_error = abs(predicted - expected) / max(abs(predicted), abs(expected))
-        scores.append(max(0.0, 1.0 - float(relative_error)))
+        try:
+            relative_error = abs(predicted - expected) / max(abs(predicted), abs(expected))
+            scores.append(max(0.0, 1.0 - float(relative_error)))
+        except DecimalException:
+            # The policy can emit exponents outside Decimal's arithmetic range.
+            # This is an invalid partial-credit candidate, not a failed rollout.
+            continue
     return min(0.9999, max(scores, default=0.0))

@@ -1,0 +1,101 @@
+import tempfile
+import unittest
+from pathlib import Path
+
+from adaptive_vision_rl.verl.checkpoints import (
+    install_checkpoint_retention,
+    prune_local_checkpoints,
+)
+
+
+class CheckpointRetentionTests(unittest.TestCase):
+    @staticmethod
+    def make_checkpoint(root, step):
+        actor = root / f"global_step_{step}" / "actor"
+        actor.mkdir(parents=True)
+        for name in ("model", "optim", "extra_state"):
+            (actor / f"{name}_world_size_1_rank_0.pt").touch()
+        (actor.parent / "data.pt").touch()
+
+    def test_prunes_old_complete_and_partial_steps_after_resume(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for step in (20, 40, 60):
+                self.make_checkpoint(root, step)
+            (root / "global_step_10").mkdir()
+            (root / "global_step_80").mkdir()
+            (root / "unrelated").mkdir()
+            (root / "latest_checkpointed_iteration.txt").write_text("60")
+
+            removed = prune_local_checkpoints(root, keep=2)
+
+            self.assertEqual(
+                {path.name for path in removed},
+                {"global_step_10", "global_step_20", "global_step_80"},
+            )
+            self.assertTrue((root / "global_step_40").is_dir())
+            self.assertTrue((root / "global_step_60").is_dir())
+            self.assertTrue((root / "unrelated").is_dir())
+
+    def test_never_prunes_without_complete_latest_checkpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "global_step_20").mkdir()
+            (root / "latest_checkpointed_iteration.txt").write_text("20")
+            with self.assertRaisesRegex(RuntimeError, "incomplete"):
+                prune_local_checkpoints(root, keep=2)
+            self.assertTrue((root / "global_step_20").is_dir())
+
+    def test_one_checkpoint_is_removed_before_first_resumed_save(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_checkpoint(root, 20)
+            (root / "latest_checkpointed_iteration.txt").write_text("20")
+            old_exists_during_save = []
+
+            class Trainer:
+                def _load_checkpoint(self):
+                    return None
+
+                def _save_checkpoint(self):
+                    old_exists_during_save.append((root / "global_step_20").exists())
+                    CheckpointRetentionTests.make_checkpoint(root, 40)
+                    (root / "latest_checkpointed_iteration.txt").write_text("40")
+
+            trainer = Trainer()
+            install_checkpoint_retention(trainer, root, keep=1)
+            trainer._load_checkpoint()
+            trainer._save_checkpoint()
+
+            self.assertEqual(old_exists_during_save, [False])
+            self.assertFalse((root / "global_step_20").exists())
+            self.assertTrue((root / "global_step_40").is_dir())
+
+    def test_two_checkpoint_retention_keeps_old_until_save_succeeds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_checkpoint(root, 20)
+            (root / "latest_checkpointed_iteration.txt").write_text("20")
+            old_exists_during_save = []
+
+            class Trainer:
+                def _load_checkpoint(self):
+                    return None
+
+                def _save_checkpoint(self):
+                    old_exists_during_save.append((root / "global_step_20").exists())
+                    CheckpointRetentionTests.make_checkpoint(root, 40)
+                    (root / "latest_checkpointed_iteration.txt").write_text("40")
+
+            trainer = Trainer()
+            install_checkpoint_retention(trainer, root, keep=2)
+            trainer._load_checkpoint()
+            trainer._save_checkpoint()
+
+            self.assertEqual(old_exists_during_save, [True])
+            self.assertTrue((root / "global_step_20").is_dir())
+            self.assertTrue((root / "global_step_40").is_dir())
+
+
+if __name__ == "__main__":
+    unittest.main()
