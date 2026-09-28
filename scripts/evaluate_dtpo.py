@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from adaptive_vision_rl.answer_reward import FORMAT_REWARD_MAX
 from adaptive_vision_rl.prompts import INITIAL_PROMPT, SECOND_PROMPT
 from adaptive_vision_rl.protocol import ParsedAction, extract_answer_candidate, parse_action
 from adaptive_vision_rl.thinking_template import (
@@ -35,7 +36,7 @@ from scripts.dataset_pilot.reward import geometry_reward
 DEFAULT_DATASET = ROOT / "data/visionthink_3000_300_500_balanced"
 DEFAULT_CHECKPOINT = Path("/root/autodl-tmp/checkpoints/qwen3vl_4b_dtpo_lora")
 DEFAULT_OUTPUT = Path("/root/autodl-tmp/outputs/evaluation/qwen3vl_4b_dtpo_lora_test")
-DEFAULT_MODEL = "Qwen/Qwen3-VL-4B-Thinking"
+DEFAULT_MODEL = "/root/autodl-tmp/models/qwen3vl_4b_sft_final_merged"
 IMAGE_TOKEN = "<|vision_start|><|image_pad|><|vision_end|>"
 
 
@@ -418,7 +419,7 @@ def _finalize_record(
             image_size=state["low_size"],
         )
         prediction = final_action.answer or extract_answer_candidate(second_response or "")
-        format_reward = 0.5 * (
+        format_reward = FORMAT_REWARD_MAX * (
             state["first_format_score"] + action_format_score(final_action, "answer")
         ) / 2.0
         final_valid = final_action.valid and final_action.kind == "answer"
@@ -426,7 +427,7 @@ def _finalize_record(
     else:
         final_action = first_action
         prediction = first_action.answer or extract_answer_candidate(state["first_response"])
-        format_reward = 0.5 * state["first_format_score"]
+        format_reward = FORMAT_REWARD_MAX * state["first_format_score"]
         final_valid = first_action.valid and first_action.kind == "answer"
         final_error = first_action.error
 
@@ -460,7 +461,7 @@ def _finalize_record(
         "first_response": state["first_response"],
         "second_response": second_response,
         "format_reward": format_reward,
-        "format_compliance": format_reward / 0.5,
+        "format_compliance": format_reward / FORMAT_REWARD_MAX,
         "outcome_reward": score + format_reward,
         "tool_reward_eligible": sample.tool_reward_eligible,
         "predicted_box": state["predicted_box"],

@@ -11,24 +11,24 @@ from adaptive_vision_rl.dtpo_core import (
 class DTPOCoreTests(unittest.TestCase):
     def test_balance_cost_and_decoupled_advantages(self):
         records = [
-            TrajectoryReward("direct-ok", "q", 1, 0.5, False),
-            TrajectoryReward("direct-bad", "q", 0, 0.5, False),
-            TrajectoryReward("tool-low", "q", 1, 0.5, True, 0.25, True),
-            TrajectoryReward("tool-high", "q", 1, 0.5, True, 1.0, True),
+            TrajectoryReward("direct-ok", "q", 1, 0.1, False),
+            TrajectoryReward("direct-bad", "q", 0, 0.1, False),
+            TrajectoryReward("tool-low", "q", 1, 0.1, True, 0.25, True),
+            TrajectoryReward("tool-high", "q", 1, 0.1, True, 1.0, True),
         ]
         result = {r.trajectory_id: r for r in assign_dtpo_rewards_and_advantages(records)}
         self.assertEqual(result["direct-ok"].balance_reward, 0)
         self.assertAlmostEqual(result["tool-low"].balance_reward, -0.01)
-        self.assertAlmostEqual(result["tool-high"].outcome_reward, 1.49)
+        self.assertAlmostEqual(result["tool-high"].outcome_reward, 1.09)
         self.assertEqual(result["direct-ok"].tool_advantage, 0)
         self.assertAlmostEqual(result["tool-low"].tool_advantage, -1 / math.sqrt(2), places=5)
         self.assertAlmostEqual(result["tool-high"].tool_advantage, 1 / math.sqrt(2), places=5)
 
     def test_lucky_direct_penalty_uses_group_ratio(self):
         records = [
-            TrajectoryReward("direct", "q", 1, 0.5, False),
+            TrajectoryReward("direct", "q", 1, 0.1, False),
             *[
-                TrajectoryReward(f"tool-{i}", "q", 1, 0.5, True, i / 5, True)
+                TrajectoryReward(f"tool-{i}", "q", 1, 0.1, True, i / 5, True)
                 for i in range(5)
             ],
         ]

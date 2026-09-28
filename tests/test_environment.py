@@ -63,7 +63,7 @@ class EnvironmentTests(unittest.TestCase):
             ["<think>The answer is visible.</think><answer>42</answer>"]
         )
         self.assertTrue(dones[0])
-        self.assertEqual(float(rewards[0]), 1.5)
+        self.assertAlmostEqual(float(rewards[0]), 1.1)
         self.assertEqual(infos[0]["tool_calling"], 0)
         self.assertEqual(observations["text"][0].count("<image>"), 1)
         self.assertEqual(len(observations["image"][0]), 1)
@@ -108,10 +108,38 @@ class EnvironmentTests(unittest.TestCase):
             ["<think>The crop confirms it.</think><answer>42</answer>"]
         )
         self.assertTrue(dones[0])
-        self.assertEqual(float(rewards[0]), 1.5)
+        self.assertAlmostEqual(float(rewards[0]), 1.1)
         self.assertEqual(infos[0]["tool_calling"], 0)
         self.assertEqual(observations["text"][0].count("<image>"), 2)
         self.assertEqual(len(observations["image"][0]), 2)
+
+    def test_tool_bbox_maps_to_original_pixels_and_second_image_is_crop(self):
+        root = Path(self.temporary.name)
+        full = np.zeros((4, 8, 3), dtype=np.uint8)
+        full[:, :, 0] = np.arange(8, dtype=np.uint8)[None, :]
+        full[:, :, 1] = np.arange(4, dtype=np.uint8)[:, None]
+        Image.fromarray(full).save(root / "train/images/wide.png")
+        low = full[::2, ::2]
+        Image.fromarray(low).save(root / "train/lowres/wide.png")
+        row = {
+            **self.row,
+            "image_path": "train/images/wide.png",
+            "lowres_path": "train/lowres/wide.png",
+            "tool_reward_eligible": False,
+        }
+        self.environment.reset([row])
+        observations, _, dones, infos = self.environment.step(
+            [
+                '<think>Need the center.</think><tool_call>{"name":"request_local_region",'
+                '"arguments":{"bbox_2d":[250,250,750,750]}}</tool_call>'
+            ]
+        )
+        self.assertFalse(dones[0])
+        self.assertEqual(infos[0]["predicted_box"], [0.25, 0.25, 0.75, 0.75])
+        self.assertTrue(np.array_equal(observations["image"][0][0], low))
+        self.assertTrue(np.array_equal(observations["image"][0][1], full[1:3, 2:6]))
+        self.assertEqual(observations["text"][0].count("<image>"), 2)
+        self.assertIn(row["question"], observations["text"][0])
 
     def test_tool_trajectory_averages_format_over_both_turns(self):
         self.environment.reset([self.row])
@@ -126,8 +154,8 @@ class EnvironmentTests(unittest.TestCase):
         )
         self.assertTrue(dones[0])
         self.assertFalse(infos[0]["is_action_valid"])
-        self.assertEqual(float(rewards[0]), 1.25)
-        self.assertEqual(infos[0]["format_reward"], 0.25)
+        self.assertAlmostEqual(float(rewards[0]), 1.05)
+        self.assertEqual(infos[0]["format_reward"], 0.05)
 
     def test_mixed_batch_keeps_only_active_tool_images(self):
         direct = dict(self.row, sample_id="direct")

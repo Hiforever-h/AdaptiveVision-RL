@@ -54,10 +54,10 @@ python scripts/evaluate_dtpo.py \
 显存不足时可降低 `--batch-size` 或 `--gpu-memory-utilization`。`--batch-size` 只控制
 每批送入脚本的样本数；vLLM 仍会在批内动态调度。默认 greedy decoding 参数与训练
 validation 保持一致：temperature 0、单条输出、最多 1024 个 response token。
-默认基座为 `Qwen/Qwen3-VL-4B-Thinking`，评估与训练使用同一模板适配，
-提示词只预填 assistant 前缀，由 completion 生成完整 `<think>...</think>`。
-如果 DTPO 从 SFT 合并模型开始训练，评测时必须通过 `--model` 指定同一个
-SFT 合并模型目录；否则会将 DTPO adapter 加到错误的基座上。
+默认基座为 `/root/autodl-tmp/models/qwen3vl_4b_sft_final_merged`，与 DTPO
+训练配置一致。评估与训练使用同一模板适配，提示词只预填 assistant 前缀，
+由 completion 生成完整 `<think>...</think>`。如果训练时覆盖了
+`actor_rollout_ref.model.path`，评测时也须通过 `--model` 指定同一个基座。
 
 ## 输出
 

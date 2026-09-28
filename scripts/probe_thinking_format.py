@@ -141,6 +141,7 @@ class BaseThinkingGenerator:
         )
         configure_thinking_tokenizer(self.processor.tokenizer)
         self.think_token_id = self.processor.tokenizer.convert_tokens_to_ids("<think>")
+        self.prompt_mode = args.prompt_mode
         self.llm = LLM(
             model=args.model,
             tensor_parallel_size=1,
@@ -167,13 +168,20 @@ class BaseThinkingGenerator:
     ) -> list[Generation]:
         if len(texts) != len(images):
             raise ValueError("Prompt and image counts differ")
-        requests = [
-            {
-                "prompt": render_prompt(self.processor, text, len(group)),
-                "multi_modal_data": {"image": list(group)},
-            }
-            for text, group in zip(texts, images, strict=True)
-        ]
+        requests = []
+        for text, group in zip(texts, images, strict=True):
+            rendered = render_prompt(self.processor, text, len(group))
+            if self.prompt_mode == "ids":
+                prompt_input = {
+                    "prompt_token_ids": self.processor.tokenizer.encode(
+                        rendered, add_special_tokens=False
+                    )
+                }
+            else:
+                prompt_input = {"prompt": rendered}
+            requests.append(
+                {**prompt_input, "multi_modal_data": {"image": list(group)}}
+            )
         outputs = self.llm.generate(requests, sampling_params=self.sampling, use_tqdm=False)
         if len(outputs) != len(requests):
             raise RuntimeError("vLLM returned a different number of outputs")
@@ -345,6 +353,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--val-parquet", type=Path, default=DEFAULT_VAL_PARQUET)
     parser.add_argument("--dataset-root", type=Path, default=DEFAULT_DATASET)
     parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--prompt-mode", choices=["text", "ids"], default="text")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--offset", type=int, default=0)
     parser.add_argument("--limit", type=int, default=32)
@@ -401,6 +410,7 @@ def main() -> None:
     )
     payload = {
         "model": args.model,
+        "prompt_mode": args.prompt_mode,
         "val_parquet": str(args.val_parquet.expanduser().resolve()),
         "dataset_root": str(args.dataset_root.expanduser().resolve()),
         "source_use_tool_filter": args.source_use_tool,

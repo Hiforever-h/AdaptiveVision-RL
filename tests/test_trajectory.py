@@ -11,7 +11,11 @@ class FakeData:
         self.non_tensor_batch = {
             "traj_uid": ["direct", "tool", "tool"],
             "uid": ["question", "question", "question"],
-            "rewards": [1.5, 0.25, 0.5],
+            "rewards": [
+                encode_answer_reward(correct=True, score=1.0, format_reward=0.1),
+                0.25,
+                encode_answer_reward(correct=False, score=0.0, format_reward=0.1),
+            ],
             "anchor_obs": [
                 {
                     "stage": "decision",
@@ -54,7 +58,10 @@ class FakeValidationData:
             # verl-agent assigns one uid to each block of env.rollout.n even
             # though validation rows are unrelated and are not repeated.
             "uid": ["framework-block", "framework-block"],
-            "rewards": [1.5, 0.5],
+            "rewards": [
+                encode_answer_reward(correct=True, score=1.0, format_reward=0.1),
+                encode_answer_reward(correct=False, score=0.0, format_reward=0.0),
+            ],
             "anchor_obs": [
                 {
                     "stage": "decision",
@@ -102,7 +109,7 @@ class TrajectoryTests(unittest.TestCase):
     def test_partial_number_preserves_exact_accuracy_and_format(self):
         data = FakeValidationData()
         data.non_tensor_batch["rewards"][1] = encode_answer_reward(
-            correct=False, score=42130 / 42138, format_reward=0.25
+            correct=False, score=42130 / 42138, format_reward=0.05
         )
         config = SimpleNamespace(
             balance_penalty=0.01,
@@ -112,16 +119,25 @@ class TrajectoryTests(unittest.TestCase):
         reward = extract_trajectory_views(data, config)[1].reward
         self.assertEqual(reward.accuracy, 0.0)
         self.assertAlmostEqual(reward.answer_score, 42130 / 42138)
-        self.assertEqual(reward.format_reward, 0.25)
-        self.assertAlmostEqual(reward.outcome_reward, 42130 / 42138 + 0.25)
+        self.assertEqual(reward.format_reward, 0.05)
+        self.assertAlmostEqual(reward.outcome_reward, 42130 / 42138 + 0.05)
 
     def test_nearly_exact_score_survives_float32_reward_transport(self):
-        packed = encode_answer_reward(correct=False, score=0.9999, format_reward=0.5)
+        for expected_format in (0.0, 0.05, 0.1):
+            with self.subTest(format_reward=expected_format):
+                packed = encode_answer_reward(
+                    correct=False, score=0.9999, format_reward=expected_format
+                )
+                stored = unpack("f", pack("f", packed))[0]
+                accuracy, score, format_reward = decode_answer_reward(stored)
+                self.assertEqual(accuracy, 0.0)
+                self.assertEqual(format_reward, expected_format)
+                self.assertAlmostEqual(score, 0.9999, places=5)
+
+    def test_exact_answer_preserves_half_format_reward_after_float32_transport(self):
+        packed = encode_answer_reward(correct=True, score=1.0, format_reward=0.05)
         stored = unpack("f", pack("f", packed))[0]
-        accuracy, score, format_reward = decode_answer_reward(stored)
-        self.assertEqual(accuracy, 0.0)
-        self.assertEqual(format_reward, 0.5)
-        self.assertAlmostEqual(score, 0.9999, places=5)
+        self.assertEqual(decode_answer_reward(stored), (1.0, 1.0, 0.05))
 
 
 if __name__ == "__main__":

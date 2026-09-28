@@ -28,7 +28,8 @@ python -m unittest discover -s tests -v
 
 ## 已实现的训练语义
 
-- 当前基座为 `Qwen/Qwen3-VL-4B-Thinking`。训练与评估共用模板适配：
+- 当前基座为已合并 final SFT adapter 的
+  `/root/autodl-tmp/models/qwen3vl_4b_sft_final_merged`。训练与评估共用模板适配：
   `add_generation_prompt=True` 只预填 `<|im_start|>assistant\n`，由模型在
   completion 中自行生成 `<think>`。
 - 第一轮输入低分辨率全图和问题，策略在直接输出 `<answer>...</answer>` 与
@@ -43,10 +44,10 @@ python -m unittest discover -s tests -v
   - 唯一获取的视觉 token 数为 `low + crop`；
   - 两轮轨迹实际处理的视觉 token 数为 `low + (low + crop)`。
   两种口径都会记录。
-- Outcome Reward 为答案分（数值接近可获部分分）、最高 0.5 的格式奖励和论文形式的 balance reward
+- Outcome Reward 为答案分（数值接近可获部分分）、最高 0.1 的格式奖励和论文形式的 balance reward
   之和。只有包含非空且非占位符 `<think>...</think>` 的合法 action 才获得
-  归一化格式分 1.0，否则为 0。直接回答的格式奖励为该分数乘 0.5，
-  两轮工具轨迹先平均 tool call 与最终 answer 的格式分再乘 0.5。
+  归一化格式分 1.0，否则为 0。直接回答的格式奖励为该分数乘 0.1，
+  两轮工具轨迹先平均 tool call 与最终 answer 的格式分再乘 0.1。
   答案内容分与格式分仍分别计算。Balance penalty 从论文的 0.1 降为 0.01，
   阈值保持 0.2。
 - PPO 使用论文的非对称裁剪范围：下界 0.20、上界 0.24；学习率为
@@ -55,9 +56,14 @@ python -m unittest discover -s tests -v
   `sqrt(Coverage * IoU)` 的最大值。没有合格参考框的样本不计算工具优势。
 - 一轮直接回答仅使用 `A_outcome`。两轮轨迹的完整第一轮输出使用
   `A_outcome + 0.3 * A_tool`，第二轮回答使用 `A_outcome`。
+  这里的“完整输出”包括生成的 `<think>`、动作标签及其内容和结束 token；
+  同一轮所有有效 response token 共用该轮优势，prompt 和 padding token 不参与 loss。
+  第二轮生成的 `<think>` 与 `<answer>` 同样共用 `A_outcome`，不再加工具优势。
 - PPO 分别对工具轮 token 和回答轮 token 做归一化。每个训练 step 生成
   64 条轨迹，展开后得到 64～128 个 turn row；不足 128 的部分使用零 loss
-  padding 补齐。Padding 不参与奖励、优势、token 分母或训练指标。
+  padding 补齐。Padding 不参与奖励、优势、token 分母或训练指标。当前配置要求
+  `ppo_mini_batch_size = 2 × data.train_batch_size × env.rollout.n`，以保证两个
+  token 分母都在完整训练 step 上计算。
 - 准确率保留项目已有的确定性精确匹配；结果奖励对接近的纯数字另给相对相似度部分分，不在训练期间调用在线
   Judge 模型。
 
@@ -196,22 +202,26 @@ bash -n scripts/run_dtpo_lora.sh
 ## 两步 GPU Smoke Test
 
 正式训练前建议先运行两步训练，检查模型加载、多图 rollout、LoRA 热加载、DTPO
-loss 和 checkpoint 路径：
+loss 和 checkpoint 路径。单张 A800 80 GB 先用 actor micro batch 2、旧策略
+log-prob micro batch 4；这仅降低单次前向的峰值显存，128 个 row 的训练 step
+和 DTPO loss 分母保持不变：
 
 ```bash
 bash scripts/run_dtpo_lora.sh \
   trainer.total_training_steps=2 \
   trainer.val_before_train=false \
   trainer.test_freq=-1 \
-  trainer.save_freq=-1
+  trainer.save_freq=-1 \
+  trainer.resume_mode=disable \
+  trainer.experiment_name=qwen3vl_4b_dtpo_smoke \
+  trainer.default_local_dir=/root/autodl-tmp/checkpoints/qwen3vl_4b_dtpo_smoke \
+  trainer.rollout_data_dir=/root/autodl-tmp/outputs/rollouts/qwen3vl_4b_dtpo_smoke
 ```
 
-如果本次实验接在 SFT 后，应先将选定的 SFT LoRA checkpoint 合并导出为完整模型，
-再在 smoke test 和正式训练命令中都覆盖
-`actor_rollout_ref.model.path=/root/autodl-tmp/models/<SFT合并模型目录>`。
-默认配置中的 `Qwen/Qwen3-VL-4B-Thinking` 是原始基座，不会自动加载 SFT
-adapter。后续评测 DTPO adapter 时，`scripts/evaluate_dtpo.py --model` 也必须
-指向同一个 SFT 合并模型。
+默认配置直接读取已合并 final SFT adapter 的模型目录。启动前确认该目录包含
+`config.json` 和完整模型权重；后续 DTPO adapter 评测默认读取同一目录。
+如需切换其他 SFT 合并模型，可同时覆盖训练的
+`actor_rollout_ref.model.path=...` 与评测的 `--model ...`。
 
 Smoke test 需要重点确认：
 
@@ -301,9 +311,20 @@ bash scripts/run_dtpo_lora.sh \
 | 真实 turn row 数 | 64～128 | 直接回答 1 行，工具轨迹 2 行 |
 | Padding 后 row 数 | 128 | Padding row 的 loss 为 0 |
 | `ppo_mini_batch_size` | 128 | 覆盖完整的 step-expanded batch |
-| `ppo_micro_batch_size_per_gpu` | 8 | 每次前向／反向处理的 row 数 |
-| 梯度累积次数 | 16 | `128 ÷ 8` |
-| `rollout.log_prob_micro_batch_size_per_gpu` | 16 | 旧策略 log-prob micro batch |
+| `ppo_micro_batch_size_per_gpu` | 2 | 每次前向／反向处理的 row 数 |
+| 梯度累积次数 | 64 | `128 ÷ 2` |
+| `rollout.log_prob_micro_batch_size_per_gpu` | 4 | 旧策略 log-prob 和 entropy 的 micro batch |
+
+这个起点参考了本项目 SFT 的 micro batch 2。固定版本的 verl-agent 在 rollout
+结束后调用 vLLM level-1 sleep，训练 actor 时不再同时保留 vLLM 权重和 KV cache；
+但 DTPO 第二轮可能包含两张图片，因此尚不能仅凭 SFT 结果保证更大的 micro batch。
+旧策略 log-prob 虽不反传，仍会计算逐 token entropy；设为 4 可降低原配置 16
+的峰值，同时避免不必要地增加到 64 次前向。
+
+确认完整训练 step 能跑通且显存有余量后，可将 actor micro batch 试升到 4，
+相应梯度累积次数为 32。若 actor 更新阶段仍 OOM，再降至 1。若 OOM 发生在
+vLLM 生成或模型初始化，micro batch 设置不会解决该阶段的峰值；应根据 OOM
+堆栈和显存日志调整 vLLM 内存预算。
 
 ## 集成约束
 

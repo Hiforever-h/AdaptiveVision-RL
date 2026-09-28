@@ -40,3 +40,10 @@ temperature 0 和每轮最多 1024 个生成 token。它从 Val parquet 的 `env
 带工具提示的 Val 样本，并换一个输出目录。`source_use_tool` 只是原数据的弱提示，
 不能当作“必须调用工具”的正确标签。汇总中会分别列出这一提示为 true 和 false
 时的首轮格式与动作统计；参考框构造的第二轮也优先选提示为 true 的样本。
+
+当独立评测与 DTPO 初始验证的工具调用率不一致时，可在同一模型和 Val 切片上比较
+`--prompt-mode text` 与 `--prompt-mode ids`。前者使用独立评测的字符串 prompt 输入；
+后者像 DTPO collector 一样，用 `add_special_tokens=False` 把相同的渲染后 prompt
+编码成 `prompt_token_ids`。两次运行应指定不同的 `--output-dir`，并设
+`--reference-second-probes 0` 只比较首轮动作。两种模式都未启用 DTPO actor 的 LoRA，
+因此相同结果只能排除 prompt 输入形式，不能排除 actor/rollout 权重同步问题。

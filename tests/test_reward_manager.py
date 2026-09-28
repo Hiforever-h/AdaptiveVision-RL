@@ -21,7 +21,7 @@ class FakeData:
         self.non_tensor_batch = {
             "traj_uid": np.asarray(["direct"], dtype=object),
             "uid": np.asarray(["question"], dtype=object),
-            "rewards": np.asarray([1.5], dtype=object),
+            "rewards": np.asarray([1.1], dtype=object),
             "episode_rewards": np.asarray([0.0], dtype=object),
             "anchor_obs": np.asarray(
                 [
@@ -57,7 +57,7 @@ class RewardManagerTests(unittest.TestCase):
         self.assertEqual(rewards.dtype, np.float32)
         # This is the exact reduction shape used by verl-agent metric_utils.
         reduced = rewards[np.asarray([0])].max().item()
-        self.assertEqual(reduced, 1.5)
+        self.assertAlmostEqual(reduced, 1.1)
 
 
 if __name__ == "__main__":

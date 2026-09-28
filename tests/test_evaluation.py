@@ -99,7 +99,7 @@ class EvaluationTests(unittest.TestCase):
             "first_action_valid": True,
             "final_answer_valid": True,
             "format_compliance": 1.0,
-            "outcome_reward": 1.5,
+            "outcome_reward": 1.1,
             "tool_reward_eligible": False,
             "tool_reward": None,
             "vision_tokens_low": 10,
@@ -226,6 +226,8 @@ class EvaluationTests(unittest.TestCase):
 
         self.assertEqual([record["used_tool"] for record in records], [False, True])
         self.assertTrue(all(record["correct"] for record in records))
+        self.assertEqual([record["format_reward"] for record in records], [0.1, 0.1])
+        self.assertEqual([record["format_compliance"] for record in records], [1.0, 1.0])
         self.assertEqual(records[1]["predicted_box"], [0.0, 0.0, 0.5, 0.5])
         self.assertEqual(records[1]["tool_reward"], 1.0)
 
