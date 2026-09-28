@@ -4,34 +4,40 @@
 
 评测脚本对冻结的 500 条 Test 数据执行确定性两轮推理。它复用训练时的提示词、
 动作解析、裁剪坐标换算、答案精确准确率与数值相似度部分奖励、格式奖励和 Coverage+IoU 区域奖励口径，
-并直接用 vLLM 加载 verl-agent 保存的 LoRA adapter，无需先合并模型。动态 LoRA
+并直接用 vLLM 加载从 DTPO checkpoint 离线导出的 LoRA adapter，无需先合并模型。动态 LoRA
 评测会将 vLLM V1 EngineCore 留在当前进程，使 Qwen3-VL 模块映射补丁在模型加载
 和多模态 profiling 时都生效。
 
 ## 运行环境
 
-在训练使用的 Linux CUDA 环境和项目根目录下运行。脚本默认读取：
+在训练使用的 Linux CUDA 环境和项目根目录下运行。默认的训练输出根目录和
+Test 数据路径分别为：
 
 ```text
 /root/autodl-tmp/checkpoints/qwen3vl_4b_dtpo_lora
 data/visionthink_3000_300_500_balanced/test/annotations.jsonl
 ```
 
-checkpoint 参数可以指向以下任一层级：
+训练 checkpoint 只保存 `.pt`；评测前先用
+`python -m scripts.export_dtpo_lora --checkpoint /path/to/global_step_N --output /path/to/adapter`
+导出一次。评测脚本的 `--checkpoint` 参数可以指向独立 adapter 目录，或以下
+包含 adapter 的旧目录层级：
 
 - 训练输出根目录；
 - `global_step_N`；
 - `global_step_N/actor`；
 - `global_step_N/actor/lora_adapter`。
 
-传入训练输出根目录时，脚本优先读取 `latest_checkpointed_iteration.txt`，否则选择
-编号最大的完整 checkpoint。adapter 必须同时包含 `adapter_config.json` 和
-`adapter_model.safetensors`。
+传入包含 adapter 的旧训练输出根目录时，脚本优先读取
+`latest_checkpointed_iteration.txt`，否则选择编号最大的完整 adapter。
+adapter 必须同时包含 `adapter_config.json` 和 `adapter_model.safetensors`。
+新训练流程应显式传入离线导出的 adapter 目录。
 
 ## 先做小规模检查
 
 ```bash
 python scripts/evaluate_dtpo.py \
+  --checkpoint /root/autodl-tmp/models/qwen3vl_4b_dtpo_final_adapter \
   --limit 8 \
   --output-dir /root/autodl-tmp/outputs/evaluation/dtpo_smoke
 ```
@@ -40,6 +46,7 @@ python scripts/evaluate_dtpo.py \
 
 ```bash
 python scripts/evaluate_dtpo.py \
+  --checkpoint /root/autodl-tmp/models/qwen3vl_4b_dtpo_final_adapter \
   --output-dir /root/autodl-tmp/outputs/evaluation/qwen3vl_4b_dtpo_lora_test
 ```
 

@@ -49,7 +49,7 @@ class DTPOTaskRunner:
         from verl.utils.dataset.rl_dataset import collate_fn
         from verl.utils.fs import copy_to_local
         from verl.utils.vllm_utils import is_version_ge
-        from verl.workers.fsdp_workers import ActorRolloutRefWorker, CriticWorker
+        from verl.workers.fsdp_workers import CriticWorker
 
         from adaptive_vision_rl.environment import make_adaptive_vision_envs
         from adaptive_vision_rl.thinking_template import configure_thinking_tokenizer
@@ -57,6 +57,7 @@ class DTPOTaskRunner:
         from adaptive_vision_rl.verl.checkpoints import install_checkpoint_retention
         from adaptive_vision_rl.verl.dtpo import install_driver_hooks
         from adaptive_vision_rl.verl.reward_manager import AdaptiveVisionRewardManager
+        from adaptive_vision_rl.verl.worker import DTPOActorRolloutRefWorker
 
         pprint(OmegaConf.to_container(config, resolve=True))
         if config.trainer.n_gpus_per_node != 1 or config.trainer.nnodes != 1:
@@ -117,7 +118,7 @@ class DTPOTaskRunner:
         envs, val_envs = make_adaptive_vision_envs(config, processor)
         install_driver_hooks(config)
 
-        actor_rollout_cls = ActorRolloutRefWorker
+        actor_rollout_cls = DTPOActorRolloutRefWorker
         role_worker_mapping = {
             Role.ActorRollout: ray.remote(actor_rollout_cls),
             Role.Critic: ray.remote(CriticWorker),
@@ -177,7 +178,6 @@ class DTPOTaskRunner:
             trainer,
             Path(config.trainer.default_local_dir),
             keep=int(config.trainer.max_actor_ckpt_to_keep),
-            expect_lora=int(config.actor_rollout_ref.model.lora_rank) > 0,
         )
 
         # verl-agent's actor only selects loss_mask when this metadata switch is on.

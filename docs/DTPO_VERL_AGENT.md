@@ -261,20 +261,34 @@ trainer:
 
 本项目在成功保存和恢复后还会清理旧 `global_step_*` 目录，以免 verl-agent 在
 进程重启后遗留多余 checkpoint。checkpoint 含完整 FP32 actor 状态、
-LoRA 的 AdamW 状态、adapter、数据加载器状态和配置；预计约 19～22 GB／个。
+LoRA 的 AdamW 状态、数据加载器状态和配置；预计约 19～22 GB／个。
 断点续训后首次保存前也会先删除旧 checkpoint，以免短时占用两份空间。
 如果新 checkpoint 保存失败，这段时间内将无法从旧 checkpoint 恢复；需要从
 SFT 合并模型重新开始训练。
 首次保存后用 `du -sh /root/autodl-tmp/checkpoints/qwen3vl_4b_dtpo_lora/global_step_*`
 核对实际大小。
 
-LoRA 单独导出到 `global_step_N/actor/lora_adapter/adapter_model.safetensors`，
-并配有 `adapter_config.json`。17 B 左右的 safetensors 是零张量空文件，不能
-作为推理 adapter 使用。固定版 verl-agent 的分层 LoRA 提取在 Qwen3-VL 上可能
-返回空结果；项目 hook 此时会用完整 FSDP 参数提取重试，保存后还会读取文件头
-确认至少有一个张量。若仍为空，训练会明确报错；同目录下的 `.pt` 模型与优化器
-状态仍可用于修复代码后恢复训练。运行中的进程不会自动载入新代码，需重新启动
-训练进程才能应用修复。
+周期 checkpoint 不再导出独立 adapter。固定版 verl-agent 的 Qwen3-VL
+LoRA 导出曾产生 17 B 空文件或零张量错误；训练需要的 504 个 LoRA 张量
+（run2 step 140 实测）已包含在 `model_world_size_1_rank_0.pt`。项目 worker 只调用上游 FSDP
+checkpoint manager，不进入其额外 adapter 导出分支。运行中的进程不会自动载入
+新代码，需重新启动训练进程才能应用。
+
+训练最后一步仍会保存完整 checkpoint，不会自动生成 adapter。需要评测或部署时，
+从指定 step 的 `.pt` 离线导出一次，例如 run2 的 step 140：
+
+```bash
+python -m scripts.export_dtpo_lora \
+  --checkpoint /root/autodl-tmp/checkpoints/qwen3vl_4b_dtpo_run2/global_step_140 \
+  --output /root/autodl-tmp/models/qwen3vl_4b_dtpo_run2_step140_adapter \
+  --expected-tensors 504
+```
+
+导出只读取模型 `.pt`，并用内存映射避免把 19 GB 模型文件全部复制到内存。
+输出目录包含 `adapter_model.safetensors` 和 `adapter_config.json`；评测时将
+此目录传给 `scripts/evaluate_dtpo.py --checkpoint`。若训练时通过命令行覆盖过
+基础模型路径、LoRA rank 或 alpha，导出时也用 `--base-model`、`--rank`、`--alpha`
+传入相同值；若用另一份配置文件启动，则用 `--config` 指向它。
 
 验证在训练前和每 50 step 运行一次（最后一步也运行），使用固定 val 集、
 `temperature=0` 的贪心生成和当前 actor 的内存中 LoRA；每次生成前由 FSDP
@@ -288,7 +302,7 @@ sharding manager 把 LoRA 参数同步到 vLLM，不读取 `lora_adapter` 导出
 `trainer.default_local_dir` 控制。当前默认训练输出均写到 AutoDL 数据盘：
 
 ```text
-/root/autodl-tmp/checkpoints/qwen3vl_4b_dtpo_lora  # checkpoint 与最终 LoRA adapter
+/root/autodl-tmp/checkpoints/qwen3vl_4b_dtpo_lora  # 可恢复训练的 checkpoint
 /root/autodl-tmp/outputs/rollouts/qwen3vl_4b_dtpo_lora  # rollout JSONL
 /root/autodl-tmp/wandb  # WandB 本地日志
 ```
