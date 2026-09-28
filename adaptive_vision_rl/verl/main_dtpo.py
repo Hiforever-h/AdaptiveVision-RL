@@ -177,6 +177,7 @@ class DTPOTaskRunner:
             trainer,
             Path(config.trainer.default_local_dir),
             keep=int(config.trainer.max_actor_ckpt_to_keep),
+            expect_lora=int(config.actor_rollout_ref.model.lora_rank) > 0,
         )
 
         # verl-agent's actor only selects loss_mask when this metadata switch is on.

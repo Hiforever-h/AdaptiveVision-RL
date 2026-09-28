@@ -2,12 +2,39 @@
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 from pathlib import Path
 
 
 _STEP_DIR = re.compile(r"global_step_(\d+)")
+
+
+def validate_lora_adapter(root: Path, step: int) -> int:
+    """Check that the PEFT export contains tensor entries, not an empty header."""
+
+    adapter = root / f"global_step_{step}" / "actor" / "lora_adapter"
+    weights = adapter / "adapter_model.safetensors"
+    config = adapter / "adapter_config.json"
+    if not config.is_file() or not weights.is_file():
+        raise RuntimeError(
+            f"LoRA adapter export is missing under {adapter}; the .pt checkpoint "
+            "may still be resumable"
+        )
+    with weights.open("rb") as stream:
+        size = weights.stat().st_size
+        header_size = int.from_bytes(stream.read(8), "little")
+        if header_size < 2 or header_size > min(size - 8, 16_000_000):
+            raise RuntimeError(f"LoRA adapter has an invalid safetensors header: {weights}")
+        header = json.loads(stream.read(header_size))
+    tensor_count = sum(name != "__metadata__" for name in header)
+    if not tensor_count:
+        raise RuntimeError(
+            f"LoRA adapter contains zero tensors: {weights}; the .pt checkpoint "
+            "may still be resumable"
+        )
+    return tensor_count
 
 
 def prune_local_checkpoints(root: Path, *, keep: int) -> list[Path]:
@@ -52,7 +79,9 @@ def prune_local_checkpoints(root: Path, *, keep: int) -> list[Path]:
     return removed
 
 
-def install_checkpoint_retention(trainer, root: Path, *, keep: int) -> None:
+def install_checkpoint_retention(
+    trainer, root: Path, *, keep: int, expect_lora: bool = False
+) -> None:
     """Apply cross-restart retention while limiting peak disk use for keep=1."""
 
     original_load = trainer._load_checkpoint
@@ -92,6 +121,13 @@ def install_checkpoint_retention(trainer, root: Path, *, keep: int) -> None:
                     )
         result = original_save()
         saved_since_load = True
+        if expect_lora:
+            tensor_count = validate_lora_adapter(root, int(trainer.global_steps))
+            print(
+                f"Validated DTPO LoRA adapter with {tensor_count} tensors "
+                f"at global_step_{trainer.global_steps}",
+                flush=True,
+            )
         prune_or_warn()
         return result
 

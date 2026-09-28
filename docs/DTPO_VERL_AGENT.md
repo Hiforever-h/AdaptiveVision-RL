@@ -268,6 +268,22 @@ SFT 合并模型重新开始训练。
 首次保存后用 `du -sh /root/autodl-tmp/checkpoints/qwen3vl_4b_dtpo_lora/global_step_*`
 核对实际大小。
 
+LoRA 单独导出到 `global_step_N/actor/lora_adapter/adapter_model.safetensors`，
+并配有 `adapter_config.json`。17 B 左右的 safetensors 是零张量空文件，不能
+作为推理 adapter 使用。固定版 verl-agent 的分层 LoRA 提取在 Qwen3-VL 上可能
+返回空结果；项目 hook 此时会用完整 FSDP 参数提取重试，保存后还会读取文件头
+确认至少有一个张量。若仍为空，训练会明确报错；同目录下的 `.pt` 模型与优化器
+状态仍可用于修复代码后恢复训练。运行中的进程不会自动载入新代码，需重新启动
+训练进程才能应用修复。
+
+验证在训练前和每 50 step 运行一次（最后一步也运行），使用固定 val 集、
+`temperature=0` 的贪心生成和当前 actor 的内存中 LoRA；每次生成前由 FSDP
+sharding manager 把 LoRA 参数同步到 vLLM，不读取 `lora_adapter` 导出文件。
+因此空的独立 adapter 文件不会直接导致验证沿用旧权重。连续几次验证指标
+完全相同，仍需看当前 run 的 `actor/grad_norm`、`actor/lr` 和验证样例输出，
+才能区分参数没有更新与贪心输出尚未改变。可在重启时添加
+`trainer.log_val_generations=16`，把部分验证样例写入 WandB 供逐次比较。
+
 最后一个训练 step 无论能否被 20 整除都会保存。输出目录由
 `trainer.default_local_dir` 控制。当前默认训练输出均写到 AutoDL 数据盘：
 
