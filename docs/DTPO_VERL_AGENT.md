@@ -279,8 +279,8 @@ checkpoint manager，不进入其额外 adapter 导出分支。运行中的进�
 
 ```bash
 python -m scripts.export_dtpo_lora \
-  --checkpoint /root/autodl-tmp/checkpoints/qwen3vl_4b_dtpo_run2/global_step_140 \
-  --output /root/autodl-tmp/models/qwen3vl_4b_dtpo_run2_step140_adapter \
+  --checkpoint /root/autodl-tmp/checkpoints/qwen3vl_4b_dtpo_run2/global_step_300 \
+  --output /root/autodl-tmp/models/qwen3vl_4b_dtpo_run2_step300_adapter \
   --expected-tensors 504
 ```
 
