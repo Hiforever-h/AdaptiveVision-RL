@@ -40,6 +40,9 @@ python -m unittest discover -s tests -v
 - 合法裁剪请求会产生第二轮模型输出，第二轮不得再次调用工具。
 - 第二轮同时输入低分辨率全图和高清局部图；vLLM 已显式设置为每个 prompt
   最多接收两张图片。
+- SFT、rollout 和独立评测共用 `adaptive_vision_rl/images.py` 的预处理。
+  每轮传入原始低清图和裁剪图，仅在构造模型输入时缩放一次；图像加载先应用
+  EXIF 方向，确保低清图与高清原图的裁剪坐标一致。
 - verl-agent 对每个 turn 单独前向，因此：
   - 唯一获取的视觉 token 数为 `low + crop`；
   - 两轮轨迹实际处理的视觉 token 数为 `low + (low + crop)`。
@@ -48,8 +51,10 @@ python -m unittest discover -s tests -v
   之和。只有包含非空且非占位符 `<think>...</think>` 的合法 action 才获得
   归一化格式分 1.0，否则为 0。直接回答的格式奖励为该分数乘 0.1，
   两轮工具轨迹先平均 tool call 与最终 answer 的格式分再乘 0.1。
-  答案内容分与格式分仍分别计算。Balance penalty 从论文的 0.1 降为 0.01，
-  阈值保持 0.2。
+  格式不合规的最终答案不获得答案分或准确率；两轮轨迹仍保留合法工具轮的格式分。
+  日志中的 `answer_score` 保留原始相似度，非精确答案在构造 Outcome Reward 时
+  乘以 `1 - balance_penalty`，避免近似错误答案因免付成本而超过精确答案。
+  Balance penalty 从论文的 0.1 降为 0.01，阈值保持 0.2。
 - PPO 使用论文的非对称裁剪范围：下界 0.20、上界 0.24；学习率为
   `1e-6`，不使用 KL，工具优势系数为 0.3。
 - Tool Reward 对所有候选参考框取
@@ -268,14 +273,25 @@ SFT 合并模型重新开始训练。
 首次保存后用 `du -sh /root/autodl-tmp/checkpoints/qwen3vl_4b_dtpo_lora/global_step_*`
 核对实际大小。
 
-周期 checkpoint 不再导出独立 adapter。固定版 verl-agent 的 Qwen3-VL
-LoRA 导出曾产生 17 B 空文件或零张量错误；训练需要的 504 个 LoRA 张量
-（run2 step 140 实测）已包含在 `model_world_size_1_rank_0.pt`。项目 worker 只调用上游 FSDP
-checkpoint manager，不进入其额外 adapter 导出分支。运行中的进程不会自动载入
-新代码，需重新启动训练进程才能应用。
+每次保存 checkpoint（包括训练最后一步）也会自动保存当前 LoRA adapter：
 
-训练最后一步仍会保存完整 checkpoint，不会自动生成 adapter。需要评测或部署时，
-从指定 step 的 `.pt` 离线导出一次，例如 run2 的 step 140：
+```text
+global_step_N/actor/lora_adapter/adapter_model.safetensors
+global_step_N/actor/lora_adapter/adapter_config.json
+```
+
+adapter 使用 actor 实际的 LoRA 配置，默认 4B/rank 64 模型约有 504 个张量，
+另占约 0.5 GB 磁盘空间，并随所属 checkpoint 一起轮换删除。评测时可直接将
+训练输出根目录或指定 `global_step_N` 传给 `scripts/evaluate_dtpo.py --checkpoint`。
+
+固定版 verl-agent 的分层收集器漏掉 Qwen3-VL 的 `language_model.layers`，
+曾产生 17 B 空文件。项目改为在完整 FSDP 参数上下文内收集并复制 LoRA，
+检查 A/B 配对、形状及是否漏收；权重和配置都写入成功后才发布 adapter 目录。
+adapter 收集或写入失败只打印警告，训练继续；完整 `.pt` checkpoint 仍保留，
+可后续离线提取 adapter。完整 checkpoint 本身保存失败仍会报错。
+运行中的进程不会自动载入新代码，需重新启动训练进程才能应用。
+
+旧 checkpoint 若只有 `.pt`，仍可按需离线导出，例如 run2 的 step 300：
 
 ```bash
 python -m scripts.export_dtpo_lora \
@@ -292,7 +308,8 @@ python -m scripts.export_dtpo_lora \
 
 验证在训练前和每 50 step 运行一次（最后一步也运行），使用固定 val 集、
 `temperature=0` 的贪心生成和当前 actor 的内存中 LoRA；每次生成前由 FSDP
-sharding manager 把 LoRA 参数同步到 vLLM，不读取 `lora_adapter` 导出文件。
+sharding manager 把 LoRA 参数同步到 vLLM；首次同步也会在基础权重之后立即
+加载当前 LoRA，不读取 `lora_adapter` 导出文件。
 因此空的独立 adapter 文件不会直接导致验证沿用旧权重。连续几次验证指标
 完全相同，仍需看当前 run 的 `actor/grad_norm`、`actor/lr` 和验证样例输出，
 才能区分参数没有更新与贪心输出尚未改变。可在重启时添加

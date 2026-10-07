@@ -125,7 +125,7 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(metrics["tool_call_rate"], 0.5)
 
     def test_close_number_affects_reward_but_not_exact_accuracy(self):
-        response = "<answer>42130</answer>"
+        response = "<think>Read the number.</think><answer>42130</answer>"
         sample = EvalSample(
             sample_id="numeric",
             question="What number?",
@@ -142,7 +142,7 @@ class EvaluationTests(unittest.TestCase):
             "used_tool": False,
             "low_size": (400, 300),
             "first_response": response,
-            "first_format_score": 0.0,
+            "first_format_score": 1.0,
             "vision_tokens_low": 1,
             "vision_tokens_crop": 0,
             "vision_tokens_full": 2,
@@ -155,7 +155,7 @@ class EvaluationTests(unittest.TestCase):
         record = _finalize_record(state)
         self.assertFalse(record["correct"])
         self.assertAlmostEqual(record["answer_score"], 42130 / 42138)
-        self.assertAlmostEqual(record["outcome_reward"], 42130 / 42138)
+        self.assertAlmostEqual(record["outcome_reward"], 42130 / 42138 + 0.1)
         metrics = metric_block([record])
         self.assertEqual(metrics["accuracy"], 0.0)
         self.assertAlmostEqual(metrics["answer_score"], 42130 / 42138)

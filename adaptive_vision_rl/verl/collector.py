@@ -6,10 +6,11 @@ import numpy as np
 import torch
 
 from agent_system.multi_turn_rollout.rollout_loop import TrajectoryCollector
-from agent_system.multi_turn_rollout.utils import process_image, torch_to_numpy
+from agent_system.multi_turn_rollout.utils import torch_to_numpy
 from verl.utils.model import compute_position_id_with_mask
 import verl.utils.torch_functional as verl_F
 
+from adaptive_vision_rl.images import prepare_image
 from adaptive_vision_rl.thinking_template import apply_thinking_chat_template
 from .image_budget import fit_image_prompt
 
@@ -42,7 +43,7 @@ class AdaptiveVisionTrajectoryCollector(TrajectoryCollector):
                     tokenizer=self.tokenizer,
                     processor=self.processor,
                     max_prompt_length=int(self.config.data.max_prompt_length),
-                    process_image=process_image,
+                    process_image=prepare_image,
                 )
             except ValueError as exc:
                 sample_id = anchor.get("sample_id", "?") if isinstance(anchor, dict) else "?"

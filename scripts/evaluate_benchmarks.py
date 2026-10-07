@@ -256,17 +256,15 @@ def evaluate_batch(evaluator: Any, samples: Sequence[BenchmarkSample], mode: str
     for sample in samples:
         full_raw = load_rgb(sample.high_path)
         low_raw = load_rgb(sample.low_path) if mode == "low_tool" else None
-        full = prepare_image(full_raw)
-        low = prepare_image(low_raw) if low_raw is not None else None
-        states.append({"sample": sample, "full_raw": full_raw, "low": low,
+        states.append({"sample": sample, "full_raw": full_raw, "low": low_raw,
                        "low_size": low_raw.size if low_raw is not None else None,
-                       "full_tokens": full_image_token_count(evaluator, sample.question, full) if mode == "low_tool" else None})
+                       "full_tokens": full_image_token_count(evaluator, sample.question, full_raw) if mode == "low_tool" else None})
         if mode == "low_tool":
             prompts.append(INITIAL_PROMPT.format(question=sample.question, width=low_raw.width, height=low_raw.height))
-            image_groups.append([low])
+            image_groups.append([low_raw])
         elif mode == "high_only":
             prompts.append(HIGH_ONLY_PROMPT.format(question=sample.question))
-            image_groups.append([full])
+            image_groups.append([full_raw])
         else:
             raise ValueError(f"unknown mode: {mode}")
     first, first_counts, first_seconds = _checked_generate(evaluator, prompts, image_groups)
@@ -284,7 +282,7 @@ def evaluate_batch(evaluator: Any, samples: Sequence[BenchmarkSample], mode: str
         state["crop_box"] = executed
         tool_states.append(state)
         second_prompts.append(SECOND_PROMPT.format(question=state["sample"].question))
-        second_images.append([state["low"], prepare_image(crop)])
+        second_images.append([state["low"], crop])
     second_seconds = 0.0
     if tool_states:
         second, second_counts, second_seconds = _checked_generate(evaluator, second_prompts, second_images)

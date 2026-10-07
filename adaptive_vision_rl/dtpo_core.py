@@ -51,8 +51,8 @@ def assign_dtpo_rewards_and_advantages(
     project rather than AdaptVision's literal Eq. 13.
     """
 
-    if balance_penalty < 0:
-        raise ValueError("balance_penalty must be non-negative")
+    if not math.isfinite(balance_penalty) or not 0 <= balance_penalty < 1:
+        raise ValueError("balance_penalty must be finite and within [0, 1)")
     if not 0 <= balance_threshold <= 1:
         raise ValueError("balance_threshold must be in [0, 1]")
 
@@ -75,9 +75,16 @@ def assign_dtpo_rewards_and_advantages(
                     balance = -balance_penalty
                 elif direct_correct_ratio < balance_threshold:
                     balance = -balance_penalty
-            outcome = (
+            score = (
                 record.answer_score if record.answer_score is not None else record.accuracy
-            ) + record.format_reward + balance
+            )
+            if record.accuracy <= 0:
+                # Reserve the full balance cost below exact-answer credit. An
+                # inexact number must not beat a correct tool answer merely
+                # because only exact answers pay the balance penalty. Keep the
+                # raw similarity in answer_score for diagnostics.
+                score *= 1.0 - balance_penalty
+            outcome = score + record.format_reward + balance
             rewarded.append(replace(record, balance_reward=balance, outcome_reward=outcome))
 
         outcome_advantages = _sample_standardize(

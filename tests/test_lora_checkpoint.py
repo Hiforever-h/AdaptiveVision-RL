@@ -49,3 +49,15 @@ class LoraCheckpointTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(ValueError, "Unexpected LoRA A shape"):
             select_lora_tensors(state, rank=64)
+
+    def test_rejects_zero_sized_shards_even_when_rank_dimension_matches(self):
+        for a_shape, b_shape in (((64, 0), (2560, 64)), ((64, 2560), (0, 64))):
+            with self.subTest(a=a_shape, b=b_shape):
+                with self.assertRaisesRegex(ValueError, "Unexpected LoRA [AB] shape"):
+                    select_lora_tensors(
+                        {
+                            "layer.q_proj.lora_A.default.weight": FakeTensor(a_shape),
+                            "layer.q_proj.lora_B.default.weight": FakeTensor(b_shape),
+                        },
+                        rank=64,
+                    )

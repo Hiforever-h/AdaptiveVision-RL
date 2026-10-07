@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import json
-import math
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
 from PIL import Image
 
+from adaptive_vision_rl.images import prepare_image
 from adaptive_vision_rl.thinking_template import apply_thinking_chat_template
 
 
@@ -75,20 +75,6 @@ def load_turns(path: Path, *, data_dir: Path = ROOT / "data",
     if dict(counts) != expected_counts or len(rows) != 2250:
         raise ValueError(f"expected 2,250 turns in three groups of 750, got {dict(counts)}")
     return rows
-
-
-def prepare_image(image: Image.Image, *, max_pixels: int = 2048 * 2048,
-                  min_pixels: int = 256 * 256) -> Image.Image:
-    """Use the same size normalization as rollout and scripts/evaluate_dtpo.py."""
-    result = image.convert("RGB")
-    area = result.width * result.height
-    if area > max_pixels:
-        scale = math.sqrt(max_pixels / area)
-    elif area < min_pixels:
-        scale = math.sqrt(min_pixels / area)
-    else:
-        return result
-    return result.resize((int(result.width * scale), int(result.height * scale)))
 
 
 def encode_turn(row: dict[str, Any], processor: Any, *, max_prompt_tokens: int,

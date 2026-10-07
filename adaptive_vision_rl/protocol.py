@@ -52,7 +52,8 @@ def extract_answer_candidate(text: str) -> str | None:
     """Extract answer content even when the rest of the format is invalid.
 
     A non-empty ``think`` block is required for a valid action.
-    Accuracy and format rewards remain separate for otherwise malformed answers.
+    This diagnostic helper does not make a malformed action eligible for answer
+    credit; training and evaluation score only valid answer actions.
     """
 
     if not isinstance(text, str):

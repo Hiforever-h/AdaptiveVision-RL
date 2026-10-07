@@ -120,7 +120,7 @@ class TrajectoryTests(unittest.TestCase):
         self.assertEqual(reward.accuracy, 0.0)
         self.assertAlmostEqual(reward.answer_score, 42130 / 42138)
         self.assertEqual(reward.format_reward, 0.05)
-        self.assertAlmostEqual(reward.outcome_reward, 42130 / 42138 + 0.05)
+        self.assertAlmostEqual(reward.outcome_reward, (42130 / 42138) * 0.99 + 0.05)
 
     def test_nearly_exact_score_survives_float32_reward_transport(self):
         for expected_format in (0.0, 0.05, 0.1):

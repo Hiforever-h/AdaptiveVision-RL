@@ -7,14 +7,14 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from PIL import Image
 
 from scripts.dataset_pilot.common import answer_check, answer_score, pixel_box
 from scripts.dataset_pilot.reward import geometry_reward
 
 from .answer_reward import FORMAT_REWARD_MAX, encode_answer_reward
+from .images import load_rgb, prepare_image
 from .prompts import INITIAL_PROMPT, SECOND_PROMPT
-from .protocol import ParsedAction, extract_answer_candidate, parse_action
+from .protocol import ParsedAction, parse_action
 from .verl.image_budget import pad_thin_crop
 
 
@@ -42,15 +42,12 @@ class AdaptiveVisionEnvironmentManager:
 
     @staticmethod
     def _load_rgb(path: Path) -> np.ndarray:
-        with Image.open(path) as image:
-            return np.asarray(image.convert("RGB"))
+        return np.asarray(load_rgb(path))
 
     def _vision_tokens(self, image: np.ndarray, *, cache_key: str | None = None) -> int:
         if cache_key is not None and cache_key in self._vision_token_cache:
             return self._vision_token_cache[cache_key]
-        from agent_system.multi_turn_rollout.utils import process_image
-
-        processed = process_image(image)
+        processed = prepare_image(image)
         inputs = self.processor.image_processor([processed], return_tensors="pt")
         grid = inputs["image_grid_thw"]
         merge = int(self.processor.image_processor.merge_size) ** 2
@@ -172,16 +169,15 @@ class AdaptiveVisionEnvironmentManager:
             bbox[2] / low_width,
             bbox[3] / low_height,
         ]
-        with Image.open(state["image_path_resolved"]) as original:
-            original = original.convert("RGB")
-            crop_box = pixel_box(normalized, original.width, original.height)
-            crop = np.asarray(pad_thin_crop(original.crop(tuple(crop_box))))
-            executed = [
-                crop_box[0] / original.width,
-                crop_box[1] / original.height,
-                crop_box[2] / original.width,
-                crop_box[3] / original.height,
-            ]
+        original = load_rgb(state["image_path_resolved"])
+        crop_box = pixel_box(normalized, original.width, original.height)
+        crop = np.asarray(pad_thin_crop(original.crop(tuple(crop_box))))
+        executed = [
+            crop_box[0] / original.width,
+            crop_box[1] / original.height,
+            crop_box[2] / original.width,
+            crop_box[3] / original.height,
+        ]
 
         details = None
         if state["tool_reward_eligible"] and state.get("reference_boxes"):
@@ -256,7 +252,7 @@ class AdaptiveVisionEnvironmentManager:
                     )
                     continue
 
-                candidate = action.answer or extract_answer_candidate(text)
+                candidate = action.answer if action.valid and action.kind == "answer" else None
                 accuracy, score, format_reward = self._score_answer(
                     candidate,
                     state["answers"],
@@ -287,7 +283,7 @@ class AdaptiveVisionEnvironmentManager:
                 allow_tool=False,
                 image_size=(state["low_width"], state["low_height"]),
             )
-            candidate = action.answer or extract_answer_candidate(text)
+            candidate = action.answer if action.valid and action.kind == "answer" else None
             accuracy, score, format_reward = self._score_answer(
                 candidate,
                 state["answers"],

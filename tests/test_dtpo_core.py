@@ -9,6 +9,23 @@ from adaptive_vision_rl.dtpo_core import (
 
 
 class DTPOCoreTests(unittest.TestCase):
+    def test_correct_answer_beats_near_miss_after_tool_cost(self):
+        for penalty in (0.0, 0.01, 0.2, 0.8):
+            for wrong_uses_tool in (False, True):
+                with self.subTest(penalty=penalty, wrong_uses_tool=wrong_uses_tool):
+                    records = [
+                        TrajectoryReward("exact", "q", 1, 0.1, True, answer_score=1.0),
+                        TrajectoryReward("near", "q", 0, 0.1, wrong_uses_tool,
+                                         answer_score=0.9999),
+                    ]
+                    result = {r.trajectory_id: r for r in assign_dtpo_rewards_and_advantages(
+                        records, balance_penalty=penalty
+                    )}
+                    self.assertGreater(result["exact"].outcome_reward, result["near"].outcome_reward)
+                    self.assertGreater(result["exact"].outcome_advantage, 0)
+                    self.assertLess(result["near"].outcome_advantage, 0)
+                    self.assertEqual(result["near"].answer_score, 0.9999)
+
     def test_balance_cost_and_decoupled_advantages(self):
         records = [
             TrajectoryReward("direct-ok", "q", 1, 0.1, False),

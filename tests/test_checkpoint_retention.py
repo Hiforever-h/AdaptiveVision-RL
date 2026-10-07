@@ -96,7 +96,7 @@ class CheckpointRetentionTests(unittest.TestCase):
             self.assertTrue((root / "global_step_20").is_dir())
             self.assertTrue((root / "global_step_40").is_dir())
 
-    def test_save_requires_no_separate_lora_adapter(self):
+    def test_retention_accepts_legacy_checkpoint_without_adapter(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
 

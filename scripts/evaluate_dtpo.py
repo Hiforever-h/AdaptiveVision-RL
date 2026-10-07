@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import math
 import os
 import sys
 import time
@@ -23,9 +22,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from adaptive_vision_rl.answer_reward import FORMAT_REWARD_MAX
+from adaptive_vision_rl.images import load_rgb, prepare_image
 from adaptive_vision_rl.verl.image_budget import fit_image_prompt, pad_thin_crop
 from adaptive_vision_rl.prompts import INITIAL_PROMPT, SECOND_PROMPT
-from adaptive_vision_rl.protocol import ParsedAction, extract_answer_candidate, parse_action
+from adaptive_vision_rl.protocol import ParsedAction, parse_action
 from adaptive_vision_rl.thinking_template import (
     apply_thinking_chat_template,
     configure_thinking_tokenizer,
@@ -157,30 +157,6 @@ def load_samples(
     if not samples:
         raise ValueError("the requested evaluation slice is empty")
     return samples, annotation_path
-
-
-def load_rgb(path: Path) -> Image.Image:
-    with Image.open(path) as image:
-        return image.convert("RGB").copy()
-
-
-def prepare_image(
-    image: Image.Image,
-    *,
-    max_pixels: int = 2048 * 2048,
-    min_pixels: int = 256 * 256,
-) -> Image.Image:
-    """Match verl-agent's rollout-side image size normalization."""
-
-    result = image.convert("RGB")
-    area = result.width * result.height
-    if area > max_pixels:
-        scale = math.sqrt(max_pixels / area)
-        result = result.resize((int(result.width * scale), int(result.height * scale)))
-    elif area < min_pixels:
-        scale = math.sqrt(min_pixels / area)
-        result = result.resize((int(result.width * scale), int(result.height * scale)))
-    return result
 
 
 def vision_token_count(processor: Any, image: Image.Image) -> int:
@@ -435,7 +411,6 @@ def _finalize_record(
             allow_tool=False,
             image_size=state["low_size"],
         )
-        prediction = final_action.answer or extract_answer_candidate(second_response or "")
         format_reward = FORMAT_REWARD_MAX * (
             state["first_format_score"] + action_format_score(final_action, "answer")
         ) / 2.0
@@ -443,11 +418,11 @@ def _finalize_record(
         final_error = final_action.error
     else:
         final_action = first_action
-        prediction = first_action.answer or extract_answer_candidate(state["first_response"])
         format_reward = FORMAT_REWARD_MAX * state["first_format_score"]
         final_valid = first_action.valid and first_action.kind == "answer"
         final_error = first_action.error
 
+    prediction = final_action.answer if final_valid else None
     check = (
         answer_check(prediction, sample.answers)
         if prediction is not None
@@ -509,17 +484,14 @@ def evaluate_batch(
     for sample in samples:
         low_raw = load_rgb(sample.lowres_path)
         full_raw = load_rgb(sample.image_path)
-        low_processed = prepare_image(low_raw)
-        full_processed = prepare_image(full_raw)
         low_size = low_raw.size
         state = {
             "sample": sample,
             "low_raw": low_raw,
             "full_raw": full_raw,
-            "low_processed": low_processed,
             "low_size": low_size,
-            "vision_tokens_low": vision_token_count(evaluator.processor, low_processed),
-            "vision_tokens_full": vision_token_count(evaluator.processor, full_processed),
+            "vision_tokens_low": vision_token_count(evaluator.processor, prepare_image(low_raw)),
+            "vision_tokens_full": vision_token_count(evaluator.processor, prepare_image(full_raw)),
             "vision_tokens_crop": 0,
             "predicted_box": None,
             "coverage": None,
@@ -534,7 +506,7 @@ def evaluate_batch(
                 height=low_size[1],
             )
         )
-        first_images.append([low_processed])
+        first_images.append([low_raw])
 
     started = time.perf_counter()
     first_responses = evaluator.generate(first_prompts, first_images)
@@ -568,10 +540,9 @@ def evaluate_batch(
         crop, executed = execute_crop(
             state["full_raw"], state["low_size"], action.bbox
         )
-        crop_processed = prepare_image(crop)
         state["predicted_box"] = executed
         state["vision_tokens_crop"] = vision_token_count(
-            evaluator.processor, crop_processed
+            evaluator.processor, prepare_image(crop)
         )
         sample: EvalSample = state["sample"]
         if sample.tool_reward_eligible:
@@ -586,7 +557,7 @@ def evaluate_batch(
                 state["tool_reward"] = geometry["reward"]
         tool_states.append(state)
         second_prompts.append(SECOND_PROMPT.format(question=sample.question))
-        second_images.append([state["low_processed"], crop_processed])
+        second_images.append([state["low_raw"], crop])
 
     second_responses: list[str] = []
     second_seconds = 0.0

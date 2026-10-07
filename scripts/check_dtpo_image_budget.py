@@ -16,7 +16,7 @@ for path in (ROOT, ROOT / "third_party/verl-agent"):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from agent_system.multi_turn_rollout.utils import process_image
+from adaptive_vision_rl.images import prepare_image
 from adaptive_vision_rl.prompts import INITIAL_PROMPT, SECOND_PROMPT
 from adaptive_vision_rl.thinking_template import (
     apply_thinking_chat_template,
@@ -94,7 +94,7 @@ def main() -> None:
             tokenizer=processor.tokenizer,
             processor=processor,
             max_prompt_length=args.max_prompt_length,
-            process_image=process_image,
+            process_image=prepare_image,
         )
         encoded = processor.tokenizer(
             fitted.expanded_prompt, add_special_tokens=False

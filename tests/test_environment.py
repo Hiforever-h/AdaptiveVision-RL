@@ -7,7 +7,7 @@ from adaptive_vision_rl.answer_reward import decode_answer_reward
 
 try:
     import numpy as np
-    from PIL import Image
+    from PIL import Image, ImageOps
 
     from adaptive_vision_rl.environment import AdaptiveVisionEnvironmentManager
 except ModuleNotFoundError:
@@ -68,22 +68,26 @@ class EnvironmentTests(unittest.TestCase):
         self.assertEqual(observations["text"][0].count("<image>"), 1)
         self.assertEqual(len(observations["image"][0]), 1)
 
-    def test_direct_answer_without_think_is_invalid_and_earns_no_format_credit(self):
+    def test_direct_answer_without_think_earns_no_answer_or_format_credit(self):
         self.environment.reset([self.row])
         _, rewards, dones, infos = self.environment.step(["<answer>42</answer>"])
         self.assertTrue(dones[0])
         self.assertFalse(infos[0]["is_action_valid"])
-        self.assertEqual(float(rewards[0]), 1.0)
+        self.assertEqual(float(rewards[0]), 0.0)
+        self.assertEqual(infos[0]["won"], 0.0)
+        self.assertEqual(infos[0]["answer_score"], 0.0)
         self.assertEqual(infos[0]["format_reward"], 0.0)
 
     def test_close_numeric_answer_gets_partial_score_but_not_accuracy(self):
         self.environment.reset([{**self.row, "answers": ["42138"]}])
-        _, rewards, dones, infos = self.environment.step(["<answer>42130</answer>"])
+        _, rewards, dones, infos = self.environment.step(
+            ["<think>The visible number is close.</think><answer>42130</answer>"]
+        )
         accuracy, score, format_reward = decode_answer_reward(float(rewards[0]))
         self.assertTrue(dones[0])
         self.assertEqual(accuracy, 0.0)
         self.assertAlmostEqual(score, 42130 / 42138, places=5)
-        self.assertEqual(format_reward, 0.0)
+        self.assertEqual(format_reward, 0.1)
         self.assertEqual(infos[0]["won"], 0.0)
         self.assertAlmostEqual(infos[0]["answer_score"], score, places=5)
 
@@ -186,8 +190,33 @@ class EnvironmentTests(unittest.TestCase):
         )
         self.assertTrue(dones[0])
         self.assertFalse(infos[0]["is_action_valid"])
-        self.assertAlmostEqual(float(rewards[0]), 1.05)
+        self.assertAlmostEqual(float(rewards[0]), 0.05)
         self.assertEqual(infos[0]["format_reward"], 0.05)
+        self.assertEqual(infos[0]["won"], 0.0)
+        self.assertEqual(infos[0]["answer_score"], 0.0)
+
+    def test_exif_orientation_is_applied_before_training_crop(self):
+        root = Path(self.temporary.name)
+        image = Image.linear_gradient("L").resize((64, 96)).convert("RGB")
+        exif = Image.Exif()
+        exif[274] = 6
+        image.save(root / "train/images/rotated.jpg", exif=exif)
+        with Image.open(root / "train/images/rotated.jpg") as stored:
+            oriented = ImageOps.exif_transpose(stored).convert("RGB")
+        oriented.resize((48, 32)).save(root / "train/lowres/rotated.png")
+        self.environment.reset([{
+            **self.row,
+            "image_path": "train/images/rotated.jpg",
+            "lowres_path": "train/lowres/rotated.png",
+            "tool_reward_eligible": False,
+        }])
+        observations, _, _, infos = self.environment.step([
+            '<think>Read the right side.</think><tool_call>{"name":"request_local_region",'
+            '"arguments":{"bbox_2d":[500,0,1000,1000]}}</tool_call>'
+        ])
+        expected = np.asarray(oriented.crop((48, 0, 96, 64)))
+        self.assertTrue(np.array_equal(observations["image"][0][1], expected))
+        self.assertEqual(infos[0]["predicted_box"], [0.5, 0.0, 1.0, 1.0])
 
     def test_mixed_batch_keeps_only_active_tool_images(self):
         direct = dict(self.row, sample_id="direct")
