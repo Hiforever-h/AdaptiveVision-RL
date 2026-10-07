@@ -17,7 +17,9 @@ CUDA_VISIBLE_DEVICES=0 python -m scripts.verify_rollout_consistency
 `third_party/verl-agent.commit`。使用真实的 `ActorRolloutRefWorker`、FSDP 包装、
 LoRA 在线同步、trajectory collector 和图像处理流程；不启动训练循环或 WandB。
 它只加载 `.pt` 模型权重，不恢复优化器、不更新参数、不导出 adapter、不旋转 checkpoint。
-无需额外复制完整模型或 checkpoint。
+checkpoint 中无需存在 `adapter/` 或 `actor/lora_adapter/`，也无需额外复制完整模型或 checkpoint。
+加载后直接从 FSDP 展开的 LoRA 层读取 A/B 权重，避免未包装 PEFT 模型的 `state_dict()`
+返回扁平参数而漏掉 adapter；首次和后续在线同步、checkpoint 导出共用此收集器。
 
 默认从 `data/verl_agent/val.parquet` 取前 4 个样本，保留训练配置中的 1024 response token
 上限。每个样本分别检查单图决策首轮和固定工具裁剪后的双图第二轮；第二轮不是模型

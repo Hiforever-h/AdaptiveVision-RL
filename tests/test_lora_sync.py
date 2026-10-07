@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from adaptive_vision_rl.verl.lora_sync import (
     _patch_initial_lora_sync,
+    _patch_lora_collection,
     collect_lora_params,
     install_lora_sync_fixes,
 )
@@ -45,8 +46,21 @@ class LoraSyncTests(unittest.TestCase):
             def __init__(manager):
                 manager.module = self.actor
                 manager.base_sync_done = False
+                manager.layered_summon = False
                 manager.events = []
                 manager.adapter = None
+
+            def __enter__(manager):
+                if manager.layered_summon:
+                    if not manager.base_sync_done:
+                        raise ValueError("Base model must be preloaded for layered_summon")
+                    params = collect_lora_params(manager.module)
+                elif manager.base_sync_done:
+                    from peft.utils.save_and_load import get_peft_model_state_dict
+                    params = get_peft_model_state_dict(manager.module)
+                else:
+                    params = {"q_proj.weight": self.actor.base_model.model.q_proj.base_layer.weight.detach().clone()}
+                return manager.update_params(params, peft_config=manager.module.peft_config["default"])
 
             def update_params(manager, params, peft_config=None):
                 if peft_config is not None and manager.base_sync_done:
@@ -59,15 +73,12 @@ class LoraSyncTests(unittest.TestCase):
 
         self.manager_cls = Manager
         _patch_initial_lora_sync(Manager)
+        _patch_lora_collection(Manager)
         self.manager = Manager()
         self.config = self.actor.peft_config["default"]
 
     def sync(self):
-        if self.manager.base_sync_done:
-            params = collect_lora_params(self.actor)
-        else:
-            params = {"q_proj.weight": self.actor.base_model.model.q_proj.base_layer.weight.detach().clone()}
-        self.manager.update_params(params, peft_config=self.config)
+        self.manager.__enter__()
 
     def assert_rollout_matches_actor(self):
         torch = self.torch
@@ -110,6 +121,7 @@ class LoraSyncTests(unittest.TestCase):
 
     def test_installing_twice_does_not_duplicate_adapter_registration(self):
         _patch_initial_lora_sync(self.manager_cls)
+        _patch_lora_collection(self.manager_cls)
         self.sync()
         self.assertEqual(self.manager.events, ["base", "adapter"])
 
@@ -122,14 +134,54 @@ class LoraSyncTests(unittest.TestCase):
         self.assertEqual(self.manager.events, ["base", "adapter"])
         self.assert_rollout_matches_actor()
 
-    def test_collector_rejects_empty_and_missing_whole_modules(self):
-        state = collect_lora_params(self.actor)
-        partial = {name: value for name, value in state.items() if ".k_proj." in name}
-        for invalid in ({}, partial):
-            with self.subTest(keys=list(invalid)):
-                with patch("peft.utils.save_and_load.get_peft_model_state_dict", return_value=invalid):
-                    with self.assertRaisesRegex(ValueError, "Incomplete"):
-                        collect_lora_params(self.actor)
+    def test_flattened_state_dict_does_not_hide_materialized_adapter(self):
+        expected = collect_lora_params(self.actor)
+        with patch.object(self.actor, "state_dict", return_value={"_flat_param": self.torch.ones(8)}) as state_dict:
+            actual = collect_lora_params(self.actor)
+            self.sync()
+            self.assert_rollout_matches_actor()
+            with self.torch.no_grad():
+                self.actor.base_model.model.q_proj.lora_B.default.weight.fill_(0.75)
+            self.sync()
+            self.assert_rollout_matches_actor()
+        state_dict.assert_not_called()
+        self.assertEqual(set(actual), set(expected))
+        for name in expected:
+            self.torch.testing.assert_close(actual[name], expected[name], rtol=0, atol=0)
+        self.assertFalse(self.manager.layered_summon)
+
+    def test_collector_rejects_missing_matrix_and_whole_pair(self):
+        layer = self.actor.base_model.model.q_proj
+        del layer.lora_A["default"]
+        with self.assertRaisesRegex(ValueError, "Incomplete.*q_proj"):
+            collect_lora_params(self.actor)
+        del layer.lora_B["default"]
+        with self.assertRaisesRegex(ValueError, "Incomplete.*q_proj"):
+            collect_lora_params(self.actor)
+
+    def test_collector_rejects_empty_adapter(self):
+        for child in self.actor.modules():
+            for matrix in ("lora_A", "lora_B"):
+                adapters = getattr(child, matrix, None)
+                if adapters is not None and "default" in adapters:
+                    del adapters["default"]
+        with self.assertRaisesRegex(ValueError, "Incomplete"):
+            collect_lora_params(self.actor)
+
+    def test_preloaded_rollout_bypasses_upstream_empty_export(self):
+        self.manager.base_sync_done = True
+        self.manager.base = {"q_proj.weight": self.actor.base_model.model.q_proj.base_layer.weight.detach().clone()}
+        with patch("peft.utils.save_and_load.get_peft_model_state_dict", return_value={}) as upstream:
+            self.sync()
+        upstream.assert_not_called()
+        self.assert_rollout_matches_actor()
+
+    def test_dummy_base_sync_works_with_layered_summon_enabled(self):
+        self.manager.layered_summon = True
+        self.sync()
+        self.assertEqual(self.manager.events, ["base", "adapter"])
+        self.assertTrue(self.manager.layered_summon)
+        self.assert_rollout_matches_actor()
 
     def test_cpu_tensor_copies_survive_fsdp_context_storage_changes(self):
         actor = self.actor
@@ -161,13 +213,16 @@ class LoraHookInstallationTests(unittest.TestCase):
             "verl.workers.sharding_manager.fsdp_vllm",
         )
         modules = {name: ModuleType(name) for name in names}
-        manager_cls = type("Manager", (), {"update_params": lambda *args, **kwargs: None})
+        manager_cls = type("Manager", (), {"update_params": lambda *args, **kwargs: None,
+                                          "__enter__": lambda *args, **kwargs: None})
         modules[names[-1]].FSDPVLLMShardingManager = manager_cls
         with patch.dict(sys.modules, modules):
             install_lora_sync_fixes()
             installed_update = manager_cls.update_params
+            installed_enter = manager_cls.__enter__
             install_lora_sync_fixes()
         self.assertIs(manager_cls.update_params, installed_update)
+        self.assertIs(manager_cls.__enter__, installed_enter)
         for name in (names[2], names[4], names[-1]):
             self.assertIs(modules[name].layered_summon_lora_params, collect_lora_params)
 
