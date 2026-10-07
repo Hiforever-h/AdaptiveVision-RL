@@ -34,7 +34,7 @@
 | 工具奖励 | Coverage 与 IoU 的几何平均权重均为 0.5，工具调用成本 0.01 |
 | 随机种子 | 20260922 |
 
-视觉编码器保持冻结，LoRA 仅注入语言侧注意力与 MLP 投影层；训练启用 gradient checkpointing 和 remove padding，以控制单卡显存占用。每个训练 step 包含 8 个不同问题，每题在线采样 8 条轨迹；轨迹按最多两轮交互展开为 128 条 rows，再以每卡 2 条的 micro batch 完成梯度累积。
+视觉编码器保持冻结，LoRA 仅注入语言侧注意力与 MLP 投影层；训练启用 gradient checkpointing 和 remove padding，以控制单卡显存占用。每个训练 step 包含 8 个不同问题，每题在线采样 8 条轨迹；轨迹按最多两轮交互展开并补齐为 128 条 rows，再以每卡 2 条的 micro batch 完成梯度累积。旧策略概率重算同样使用每卡 2 条，与更新前向保持一致。
 
 ## 样本示例
 

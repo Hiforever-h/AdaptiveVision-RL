@@ -32,11 +32,13 @@ def main():
     parser.add_argument("--replay-report", type=Path, help="Reuse the saved configuration, samples and responses from an earlier report directory")
     parser.add_argument("--forward-diagnostics", action="store_true", help="Replay focus tokens with repeated, base-only and precision-controlled actor forwards")
     parser.add_argument("--update-forward-diagnostics", action="store_true", help="Only compare old-policy micro=4/2 with real train/grad/checkpointing micro=2 forwards")
+    parser.add_argument("--residual-forward-diagnostics", action="store_true", help="Only micro=2 actor precision and repeated vLLM prefill diagnostics; no training")
     parser.add_argument("--override", action="append", default=[], metavar="KEY=VALUE", help="Training config override; repeat for multiple keys")
     args = parser.parse_args()
-    if (args.forward_diagnostics or args.update_forward_diagnostics) and args.replay_report is None:
+    modes = [args.forward_diagnostics, args.update_forward_diagnostics, args.residual_forward_diagnostics]
+    if any(modes) and args.replay_report is None:
         parser.error("Forward diagnostics require --replay-report to preserve the anomalous tokens")
-    if args.forward_diagnostics and args.update_forward_diagnostics:
+    if sum(modes) > 1:
         parser.error("Choose only one forward diagnostic mode")
     if args.replay_report and (args.samples is not None or args.offset or args.override or args.max_response_tokens is not None):
         parser.error("Replay preserves the original samples/configuration; omit samples/offset/override/max-response-tokens")

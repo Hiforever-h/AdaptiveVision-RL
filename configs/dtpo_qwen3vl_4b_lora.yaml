@@ -56,9 +56,10 @@ actor_rollout_ref:
     top_k: -1
     tensor_model_parallel_size: 1
     log_prob_micro_batch_size: null
-    # Old-policy log-prob also computes token entropy in the pinned verl-agent;
-    # a large no-grad micro-batch can still exhaust memory.
-    log_prob_micro_batch_size_per_gpu: 4
+    # Match the update micro-batch: BF16 packed forwards can depend on batch
+    # layout, creating a non-unit PPO ratio even before weights are updated.
+    # Old-policy log-prob also computes entropy, so keep its memory bounded.
+    log_prob_micro_batch_size_per_gpu: 2
     gpu_memory_utilization: 0.42
     enable_chunked_prefill: false
     enforce_eager: true

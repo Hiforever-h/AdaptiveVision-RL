@@ -207,9 +207,9 @@ bash -n scripts/run_dtpo_lora.sh
 ## 两步 GPU Smoke Test
 
 正式训练前建议先运行两步训练，检查模型加载、多图 rollout、LoRA 热加载、DTPO
-loss 和 checkpoint 路径。单张 A800 80 GB 先用 actor micro batch 2、旧策略
-log-prob micro batch 4；这仅降低单次前向的峰值显存，128 个 row 的训练 step
-和 DTPO loss 分母保持不变：
+loss 和 checkpoint 路径。单张 A800 80 GB 的 actor 更新与旧策略 log-prob 重算
+均使用 micro batch 2，以保持两次前向的分组一致，避免无参数更新时出现额外
+PPO ratio 偏差。128 个 row 的训练 step 和 DTPO loss 分母保持不变：
 
 ```bash
 bash scripts/run_dtpo_lora.sh \
@@ -387,16 +387,18 @@ bash scripts/run_dtpo_lora.sh \
 | `ppo_mini_batch_size` | 128 | 覆盖完整的 step-expanded batch |
 | `ppo_micro_batch_size_per_gpu` | 2 | 每次前向／反向处理的 row 数 |
 | 梯度累积次数 | 64 | `128 ÷ 2` |
-| `rollout.log_prob_micro_batch_size_per_gpu` | 4 | 旧策略 log-prob 和 entropy 的 micro batch |
+| `rollout.log_prob_micro_batch_size_per_gpu` | 2 | 旧策略 log-prob 和 entropy 的 micro batch，与 actor 更新一致 |
 
 这个起点参考了本项目 SFT 的 micro batch 2。固定版本的 verl-agent 在 rollout
 结束后调用 vLLM level-1 sleep，训练 actor 时不再同时保留 vLLM 权重和 KV cache；
 但 DTPO 第二轮可能包含两张图片，因此尚不能仅凭 SFT 结果保证更大的 micro batch。
-旧策略 log-prob 虽不反传，仍会计算逐 token entropy；设为 4 可降低原配置 16
-的峰值，同时避免不必要地增加到 64 次前向。
+旧策略 log-prob 虽不反传，仍会计算逐 token entropy。step 300 的固定回答验证中，
+旧概率按 4 条重算、更新按 2 条前向，在参数未更新时也出现了明显 ratio 偏差；
+两者都按 2 条处理后，本次单图、双图和混合场景的有效 token log-prob 完全相同。
+因此默认将两者统一为 2。此结果不代表 actor 与 vLLM 的概率差已经全部消失。
 
-确认完整训练 step 能跑通且显存有余量后，可将 actor micro batch 试升到 4，
-相应梯度累积次数为 32。若 actor 更新阶段仍 OOM，再降至 1。若 OOM 发生在
+后续若调整 micro batch，应同时调整 actor 更新和旧概率重算，并重新验证同一
+输入在无更新时的 ratio；单独调整其中一项可能重新引入偏差。若 OOM 发生在
 vLLM 生成或模型初始化，micro batch 设置不会解决该阶段的峰值；应根据 OOM
 堆栈和显存日志调整 vLLM 内存预算。
 

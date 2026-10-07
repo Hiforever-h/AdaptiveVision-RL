@@ -147,6 +147,11 @@ DeepStack 特征差。`REPORT.md` 同时给出这些 token 在不同控制下的
 
 ## 真实更新模式 micro-batch=2 与 SFT 10 步短训
 
+正式训练默认配置已将旧策略概率重算和 actor 更新的 micro-batch 均设为 2。
+下述诊断中的 micro=4 保留为历史对照，不是当前训练默认值；重放历史报告时，
+脚本仍读取报告保存的原配置。单独前向检查可使用本节末尾的
+`--update-forward-diagnostics`，不会启动短训。
+
 同步代码后，在原服务器环境、项目根目录运行：
 
 ```bash
@@ -196,3 +201,39 @@ CUDA_VISIBLE_DEVICES=0 python -m scripts.verify_rollout_consistency \
   --replay-report /root/autodl-tmp/outputs/rollout_consistency_step300_20261007_214712 \
   --update-forward-diagnostics
 ```
+
+## micro=2 下的生成端残余差异（仅前向）
+
+使用已完成的 micro=2 前向报告，运行新的独立入口：
+
+```bash
+conda activate bisight-rl
+CUDA_VISIBLE_DEVICES=0 python -m scripts.verify_rollout_residual \
+  --replay-report /root/autodl-tmp/outputs/dtpo_micro2_step10_20261007_222516/forward
+```
+
+该源目录的前向数值报告已经完成；外层原短训任务因前向进程退出段错误而失败，
+不影响读取其中完整的固定样本数据。这里不会调用短训入口、backward、optimizer、
+checkpoint 或 adapter 保存，也不需要恢复优化器。仍只读取 step 300 的模型权重。
+
+本轮保留原图片、prompt、response、position_ids 和 LoRA 指纹，将旧概率重算的
+micro-batch 明确改为 2，更新前向也为 2。记录的 `controlled_config_changes` 标明
+与源报告的这一项区别，其余模型计算配置保持原值。全部对照覆盖单图、双图和混合场景：
+
+- actor：旧概率、真实 train/grad/checkpointing 更新前向及重复；临时关闭 actor
+  BF16 reduced-precision reduction 后重复同样检查；最后恢复设置并再次重算旧概率。
+- vLLM：同一次唤醒及同一个 LoRA ID 下固定 token prefill 两次；另一次唤醒及重新
+  同步后再重算一次。每个请求都清空前缀缓存，逐样本执行，避免完整词表的 logprob 占用过多显存。
+- 混合场景：actor 真实交错重算；vLLM 复用前两组逐样本重算结果，不把复用 token 当成新的独立样本。
+
+`rollout` 是之前真实生成保存的概率，本轮没有重新采样。先检查 vLLM 同路径重复差，
+再看 rollout→prefill、prefill→actor 的对照；这些绝对差不能直接相加当成误差分解。
+精度控制只作用于 actor，vLLM 保持原值；某个控制改善结果仍不足以证明唯一根因。
+报告同时检查控制前后旧概率与更新前向的 ratio，避免降低残余差异时重新破坏 PPO 对齐。
+
+输出为 `/root/autodl-tmp/outputs/rollout_residual_step300_时间戳/`，结束打印同名 zip。
+下载整个 zip 即可。内含汇总、逐 token 数据、同步 GPU 槽位检查、版本/配置、
+`process.log`（含原生崩溃栈）和 `process_exit.json`。外层进程在子进程退出后打包，
+即使再次发生退出段错误也保留结果，并明确记录失败，不将非零退出码当作成功。
+子进程在数值检查完成后显式关闭 vLLM core 和分布式资源；是否消除上次的退出崩溃
+仍需服务器确认。所有设置均为诊断临时控制，不修改正式训练的精度配置。

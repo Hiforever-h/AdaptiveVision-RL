@@ -261,11 +261,30 @@ def _actor_log_probs(worker, batch, *, remove_padding, micro_batch_size, adapter
         torch.cuda.empty_cache()
 
 
-def _evaluate_update_forwards(worker, batch, case, values, *, temperature, persist):
+def _actor_update_log_probs(worker, batch, *, temperature, evidence, no_reduced_bf16=False):
     from verl.protocol import pad_dataproto_to_divisor
     from verl.utils.fsdp_utils import load_fsdp_model_to_gpu, offload_fsdp_model_to_cpu
     from adaptive_vision_rl.verl.update_diagnostics import update_mode_log_probs
 
+    data = batch.select(batch_keys=["input_ids", "responses", "attention_mask", "position_ids"],
+                        non_tensor_batch_keys=["multi_modal_inputs"], deepcopy=True)
+    count = len(data)
+    data, _ = pad_dataproto_to_divisor(data, 2)
+    if worker._is_offload_param:
+        load_fsdp_model_to_gpu(worker.actor_module_fsdp)
+    try:
+        with worker.ulysses_sharding_manager, precision_control(
+                worker.actor_module_fsdp, no_reduced_bf16=no_reduced_bf16):
+            data = worker.ulysses_sharding_manager.preprocess_data(data.to(torch.cuda.current_device()))
+            micro_batches = ({**micro.batch, **micro.non_tensor_batch} for micro in data.chunk(len(data) // 2))
+            evidence["no_reduced_bf16"] = no_reduced_bf16
+            return update_mode_log_probs(worker.actor, micro_batches, temperature=temperature, evidence=evidence)[:count]
+    finally:
+        if worker._is_offload_param:
+            offload_fsdp_model_to_cpu(worker.actor_module_fsdp)
+
+
+def _evaluate_update_forwards(worker, batch, case, values, *, temperature, persist):
     case["update_forward_evidence"] = {}
     for phase in ("actor_old_micro4", "actor_old_micro2", "actor_update_micro2", "actor_update_micro2_repeat"):
         print(f"  {phase}", flush=True)
@@ -276,23 +295,33 @@ def _evaluate_update_forwards(worker, batch, case, values, *, temperature, persi
                     micro_batch_size=4 if phase.endswith("4") else 2,
                     temperature=temperature, calculate_entropy=True)
             else:
-                data = batch.select(batch_keys=["input_ids", "responses", "attention_mask", "position_ids"],
-                                    non_tensor_batch_keys=["multi_modal_inputs"], deepcopy=True)
-                count = len(data)
-                data, _ = pad_dataproto_to_divisor(data, 2)
                 evidence = case["update_forward_evidence"].setdefault(phase, {})
-                if worker._is_offload_param:
-                    load_fsdp_model_to_gpu(worker.actor_module_fsdp)
-                try:
-                    with worker.ulysses_sharding_manager:
-                        data = worker.ulysses_sharding_manager.preprocess_data(data.to(torch.cuda.current_device()))
-                        micro_batches = ({**micro.batch, **micro.non_tensor_batch}
-                                         for micro in data.chunk(len(data) // 2))
-                        values[phase] = update_mode_log_probs(worker.actor, micro_batches,
-                                                              temperature=temperature, evidence=evidence)[:count]
-                finally:
-                    if worker._is_offload_param:
-                        offload_fsdp_model_to_cpu(worker.actor_module_fsdp)
+                values[phase] = _actor_update_log_probs(worker, batch, temperature=temperature, evidence=evidence)
+        except Exception:
+            case["errors"][phase] = traceback.format_exc()
+            print(case["errors"][phase], file=sys.stderr, flush=True)
+        finally:
+            gc.collect()
+            torch.cuda.empty_cache()
+            persist()
+
+
+def _evaluate_residual_actor(worker, batch, case, values, *, records, persist):
+    from adaptive_vision_rl.verl.residual_diagnostics import actor_phases, saved_micro2
+
+    values["saved_actor_old_micro2"] = saved_micro2(records, batch.batch["responses"].shape[-1])
+    case["update_forward_evidence"] = {}
+    for phase, update_mode, no_reduced in actor_phases():
+        print(f"  {phase}", flush=True)
+        try:
+            if update_mode:
+                evidence = case["update_forward_evidence"].setdefault(phase, {})
+                values[phase] = _actor_update_log_probs(worker, batch, temperature=1., evidence=evidence,
+                                                       no_reduced_bf16=no_reduced)
+            else:
+                values[phase] = _actor_log_probs(worker, batch, remove_padding=worker.config.model.use_remove_padding,
+                                                micro_batch_size=2, temperature=1., calculate_entropy=True,
+                                                no_reduced_bf16=no_reduced)
         except Exception:
             case["errors"][phase] = traceback.format_exc()
             print(case["errors"][phase], file=sys.stderr, flush=True)
@@ -358,38 +387,71 @@ def _evaluate_actor_variants(worker, batch, case, values, *, micro, remove_paddi
 
 
 def _teacher_forced_log_probs(worker, batch, raw_prompts, image_groups, *, adapter):
-    from vllm import SamplingParams
     from vllm.lora.request import LoRARequest
 
-    width = batch.batch["responses"].shape[1]
-    values = torch.full((len(batch), width), float("nan"))
-    alignments = []
     engine = worker.rollout.inference_engine
     with worker.rollout_sharding_manager:
         ids = list(engine.llm_engine.list_loras())
         if adapter and len(ids) != 1:
             raise RuntimeError(f"Expected one registered adapter, found {ids}")
         request = LoRARequest(str(ids[0]), ids[0], "/consistency-memory-adapter") if adapter else None
-        for index in range(len(batch)):
-            # Serial prefill bounds the full-vocabulary prompt-logprob memory.
-            # Reset after sleep too: freed KV storage must never be reused here.
-            engine.reset_prefix_cache()
-            response_mask = batch.batch["attention_mask"][index, -width:].bool()
-            response = batch.batch["responses"][index][response_mask].tolist()
-            prompt_mask = batch.batch["attention_mask"][index, :-width].bool()
-            prompt = batch.batch["prompts"][index][prompt_mask].tolist()
-            expected = prompt + response
-            output = engine.generate(
-                prompts=[{"prompt_token_ids": list(raw_prompts[index]) + response,
-                          "multi_modal_data": {"image": image_groups[index]}}],
-                sampling_params=SamplingParams(max_tokens=1, temperature=1.0, top_p=1.0, top_k=-1,
-                                               prompt_logprobs=0, logprobs=0, detokenize=False),
-                lora_request=request, use_tqdm=False,
-            )[0]
-            row_values, alignment = response_prompt_log_probs(output, expected, len(prompt), len(response))
-            values[index, :len(response)] = row_values
-            alignments.append(alignment)
+        return _teacher_forced_pass(engine, batch, raw_prompts, image_groups, request)
+
+
+def _teacher_forced_pass(engine, batch, raw_prompts, image_groups, request):
+    from vllm import SamplingParams
+
+    width = batch.batch["responses"].shape[1]
+    values = torch.full((len(batch), width), float("nan"))
+    alignments = []
+    for index in range(len(batch)):
+        # Serial prefill bounds the full-vocabulary prompt-logprob memory.
+        # Reset after sleep too: freed KV storage must never be reused here.
+        engine.reset_prefix_cache()
+        response_mask = batch.batch["attention_mask"][index, -width:].bool()
+        response = batch.batch["responses"][index][response_mask].tolist()
+        prompt_mask = batch.batch["attention_mask"][index, :-width].bool()
+        prompt = batch.batch["prompts"][index][prompt_mask].tolist()
+        expected = prompt + response
+        output = engine.generate(
+            prompts=[{"prompt_token_ids": list(raw_prompts[index]) + response,
+                      "multi_modal_data": {"image": image_groups[index]}}],
+            sampling_params=SamplingParams(max_tokens=1, temperature=1.0, top_p=1.0, top_k=-1,
+                                           prompt_logprobs=0, logprobs=0, detokenize=False),
+            lora_request=request, use_tqdm=False,
+        )[0]
+        row_values, alignment = response_prompt_log_probs(output, expected, len(prompt), len(response))
+        values[index, :len(response)] = row_values
+        alignments.append(alignment)
     return values, alignments
+
+
+def _evaluate_prefill_repeats(worker, batch, raw_prompts, images, case, values, *, report, persist):
+    from vllm.lora.request import LoRARequest
+
+    engine = worker.rollout.inference_engine
+    case["vllm_repeat_groups"] = {}
+    for group, phases in (("same_wake", ["vllm_prefill", "vllm_prefill_same_wake_repeat"]),
+                          ("after_wake", ["vllm_prefill_after_wake"])):
+        try:
+            with worker.rollout_sharding_manager:
+                ids = list(engine.llm_engine.list_loras())
+                if len(ids) != 1:
+                    raise RuntimeError(f"Expected one active adapter, found {ids}")
+                request = LoRARequest(str(ids[0]), ids[0], "/consistency-memory-adapter")
+                case["vllm_repeat_groups"][group] = dict(
+                    phases=phases, lora_id=ids[0], sync_event=len(report["sync_events"])-1,
+                    prefix_cache_reset_per_request=True, serial_requests=True)
+                for phase in phases:
+                    print(f"  {phase} (LoRA {ids[0]})", flush=True)
+                    values[phase], case[phase + "_alignment"] = _teacher_forced_pass(
+                        engine, batch, raw_prompts, images, request)
+                    persist()
+        except Exception:
+            case["errors"][group] = traceback.format_exc()
+            print(case["errors"][group], file=sys.stderr, flush=True)
+        finally:
+            persist()
 
 
 def _reference_actions(rows):
@@ -455,7 +517,8 @@ def _sample_records(batch, images, generation_outputs, tokenizer, values, top_k)
         row_values = {name: tensor[index][mask].tolist() for name, tensor in values.items()}
         row_values = {name: [v if math.isfinite(v) else None for v in seq] for name, seq in row_values.items()}
         top = []
-        comparison_phase = "actor_old_micro4" if "actor_old_micro4" in values else "actor_training"
+        comparison_phase = next((name for name in ("actor_old_micro4", "actor_old_micro2", "actor_training")
+                                 if name in values), None)
         if comparison_phase in values:
             left, right = values["rollout"][index], values[comparison_phase][index]
             finite = mask & torch.isfinite(left) & torch.isfinite(right)
@@ -484,7 +547,7 @@ def _sample_records(batch, images, generation_outputs, tokenizer, values, top_k)
     return rows
 
 
-def _run_gpu(args, report, persist):
+def _run_gpu(args, report, persist, *, resources=None):
     if not torch.cuda.is_available():
         raise RuntimeError("This verification requires the Linux CUDA training environment")
     if int(os.environ.get("WORLD_SIZE", "1")) != 1:
@@ -542,7 +605,13 @@ def _run_gpu(args, report, persist):
         "config YAML plus CLI overrides; .pt does not encode LoRA alpha")
     rollout = config.actor_rollout_ref.rollout
     update_probe = bool(getattr(args, "update_forward_diagnostics", False))
-    if update_probe and (int(config.actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu) != 2
+    residual_probe = bool(getattr(args, "residual_forward_diagnostics", False))
+    if residual_probe:
+        if replay_source is None or not replay_source.get("update_forward_diagnostics") or float(rollout.temperature) != 1.:
+            raise ValueError("Residual diagnostics require a completed update-forward report and temperature=1")
+        rollout.log_prob_micro_batch_size_per_gpu = 2
+        report["replay"]["controlled_config_changes"] = {"rollout.log_prob_micro_batch_size_per_gpu": 2}
+    if (update_probe or residual_probe) and (int(config.actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu) != 2
                          or config.actor_rollout_ref.actor.entropy_coeff != 0
                          or config.actor_rollout_ref.actor.use_dynamic_bsz
                          or int(config.actor_rollout_ref.actor.get("ulysses_sequence_parallel_size", 1)) != 1):
@@ -586,6 +655,8 @@ def _run_gpu(args, report, persist):
 
     print("Initializing the original FSDP actor and sync vLLM worker...", flush=True)
     worker = ActorRolloutRefWorker(config.actor_rollout_ref, role="actor_rollout")
+    if resources is not None:
+        resources.append(worker)
     worker.init_model()
     configure_thinking_tokenizer(worker.tokenizer)
     processor = hf_processor(config.actor_rollout_ref.model.path, use_fast=True,
@@ -692,13 +763,16 @@ def _run_gpu(args, report, persist):
         temperature = float(rollout.temperature)
         micro = int(rollout.log_prob_micro_batch_size_per_gpu)
         original_rmpad = bool(config.actor_rollout_ref.model.use_remove_padding)
-        if update_probe:
+        if residual_probe:
+            _evaluate_residual_actor(worker, batch, case, values, records=saved, persist=persist)
+            _evaluate_prefill_repeats(worker, batch, raw_prompts, images, case, values, report=report, persist=persist)
+        elif update_probe:
             _evaluate_update_forwards(worker, batch, case, values, temperature=temperature, persist=persist)
         else:
             _evaluate_actor_variants(worker, batch, case, values, micro=micro, remove_padding=original_rmpad,
                                  temperature=temperature, diagnostic_records=saved if args.forward_diagnostics else None,
                                  output=args.output, persist=persist)
-        for phase, enabled in ([] if update_probe else [("vllm_prefill", True), ("vllm_base_prefill", False)]):
+        for phase, enabled in ([] if update_probe or residual_probe else [("vllm_prefill", True), ("vllm_base_prefill", False)]):
             print(f"  {phase}", flush=True)
             try:
                 values[phase], case[phase + "_alignment"] = _teacher_forced_log_probs(worker, batch, raw_prompts, images, adapter=enabled)
@@ -723,12 +797,17 @@ def _run_gpu(args, report, persist):
                 case["comparisons"][f"{left}_vs_{right}"] = probability_difference(values[left], values[right], mask)
         if update_probe:
             _record_update_comparisons(case, values, mask, config.actor_rollout_ref.actor)
+        if residual_probe:
+            _record_residual_comparisons(case, values, mask, config.actor_rollout_ref.actor)
         case["rows"] = len(batch)
         case["response_tokens"] = int(mask.sum())
         case["sampling_temperature"] = temperature
         case["actor_micro_batch_size"] = micro
         case["actor_remove_padding"] = original_rmpad
         records = _sample_records(batch, images, generation_outputs, worker.tokenizer, values, args.top_tokens)
+        if residual_probe:
+            from adaptive_vision_rl.verl.residual_diagnostics import focus_probabilities
+            case["residual_focus_tokens"] = focus_probabilities(records)
         case["generation_prompt_alignment_all_match"] = all(item["generation_prompt_alignment"]["matches"] for item in records)
         _write_json(args.output / f"{name}_samples.json", records)
         persist()
@@ -753,7 +832,19 @@ def _run_gpu(args, report, persist):
         values = {name: torch.cat([source[3][name] for source in mixed_sources])[order] for name in shared}
         if "actor_training" in values:
             values["actor_separate_turns"] = values.pop("actor_training")
-        if update_probe:
+        if residual_probe:
+            values = {key: value for key, value in values.items()
+                      if key == "rollout" or key.startswith("vllm_")}
+            mixed_records = replay_records["mixed_turns"]
+            width = batch.batch["responses"].shape[-1]
+            reconstructed = replay_tensors(
+                {key: batch.batch[key][..., :-width] for key in ("input_ids", "attention_mask", "position_ids")},
+                mixed_records, response_width=width, pad_token_id=worker.tokenizer.pad_token_id)
+            if not torch.equal(reconstructed["responses"], batch.batch["responses"]):
+                raise ValueError("Mixed replay responses differ from the source report")
+            _evaluate_residual_actor(worker, batch, case, values, records=mixed_records, persist=persist)
+            case["vllm_repeat_groups"] = {"reused_serial_prefills_from": [source[0] for source in observations]}
+        elif update_probe:
             values = {name: value for name, value in values.items() if not name.startswith("actor_")}
             _evaluate_update_forwards(worker, batch, case, values, temperature=temperature, persist=persist)
         elif args.forward_diagnostics:
@@ -792,12 +883,17 @@ def _run_gpu(args, report, persist):
                 case["comparisons"][f"{left}_vs_{right}"] = probability_difference(values[left], values[right], mask)
         if update_probe:
             _record_update_comparisons(case, values, mask, config.actor_rollout_ref.actor)
+        if residual_probe:
+            _record_residual_comparisons(case, values, mask, config.actor_rollout_ref.actor)
         case.update(rows=len(batch), response_tokens=int(mask.sum()), sampling_temperature=temperature,
                     actor_micro_batch_size=micro, actor_remove_padding=original_rmpad,
                     note="Reuses the exact responses above; only actor row grouping changes, interleaving one-image/two-image rows.")
         if replay_source is not None:
             case["generation_replayed"] = True
         records = _sample_records(batch, images, generation_outputs, worker.tokenizer, values, args.top_tokens)
+        if residual_probe:
+            from adaptive_vision_rl.verl.residual_diagnostics import focus_probabilities
+            case["residual_focus_tokens"] = focus_probabilities(records)
         case["generation_prompt_alignment_all_match"] = all(item["generation_prompt_alignment"]["matches"] for item in records)
         _write_json(args.output / "mixed_turns_samples.json", records)
         persist()
@@ -813,8 +909,18 @@ def _run_gpu(args, report, persist):
                       or any(value["nonfinite_tokens"] for value in case.get("update_ratios", {}).values())
                       or not case.get("forward_diagnostics", {}).get("all_captures_valid", True)
                       for case in report["cases"])
-                  or any("inspection_error" in event for event in report["sync_events"]))
+                  or any("inspection_error" in event or not event.get("gpu_slots", {}).get("all_match", False)
+                         for event in report["sync_events"]))
     report["status"] = "partial" if incomplete else "completed"
+    manager.update_params = original_update
+    engine.generate = original_generate
+
+
+def _record_residual_comparisons(case, values, mask, actor_config):
+    from adaptive_vision_rl.verl.residual_diagnostics import comparisons
+    case["comparisons"], case["update_ratios"] = comparisons(
+        values, mask, clip_low=float(actor_config.clip_ratio_low if actor_config.clip_ratio_low is not None else actor_config.clip_ratio),
+        clip_high=float(actor_config.clip_ratio_high if actor_config.clip_ratio_high is not None else actor_config.clip_ratio))
 
 
 def _record_update_comparisons(case, values, mask, actor_config):
@@ -827,6 +933,9 @@ def _record_update_comparisons(case, values, mask, actor_config):
 
 
 def _markdown_report(report):
+    if report.get("residual_forward_diagnostics"):
+        from adaptive_vision_rl.verl.residual_diagnostics import markdown
+        return markdown(report)
     if report.get("update_forward_diagnostics"):
         return _update_markdown_report(report)
     lines = ["# 训推一致性验证报告", "", f"状态：`{report['status']}`", "",
@@ -955,6 +1064,7 @@ def run_verification(args):
         "read_only": True, "model_weights_only": True,
         "forward_diagnostics": bool(getattr(args, "forward_diagnostics", False)),
         "update_forward_diagnostics": bool(getattr(args, "update_forward_diagnostics", False)),
+        "residual_forward_diagnostics": bool(getattr(args, "residual_forward_diagnostics", False)),
         "project_commit": _git_revision(Path(__file__).resolve().parents[2]),
     }
     checkpoint_file = args.checkpoint / "actor/model_world_size_1_rank_0.pt"
@@ -964,6 +1074,7 @@ def run_verification(args):
         _write_json(args.output / "report.json", report)
 
     failed = False
+    resources = []
     started = time.monotonic()
     with (args.output / "run.log").open("w", buffering=1) as log:
         with redirect_stdout(_Tee(sys.stdout, log)), redirect_stderr(_Tee(sys.stderr, log)):
@@ -972,7 +1083,10 @@ def run_verification(args):
                 before = (stat.st_size, stat.st_mtime_ns)
                 report["checkpoint_model_file"] = {"path": str(checkpoint_file), "bytes": stat.st_size, "mtime_ns": stat.st_mtime_ns}
                 persist()
-                _run_gpu(args, report, persist)
+                if report["residual_forward_diagnostics"]:
+                    _run_gpu(args, report, persist, resources=resources)
+                else:
+                    _run_gpu(args, report, persist)
             except Exception:
                 failed = True
                 report["status"] = "failed"
@@ -994,4 +1108,33 @@ def run_verification(args):
             if path.is_file():
                 bundle.write(path, f"{args.output.name}/{path.name}")
     print(f"Report: {args.output / 'REPORT.md'}\nDownload this archive: {archive}", flush=True)
+    if resources:
+        # Preserve a complete numerical report before native shutdown, since a
+        # previous run crashed during interpreter teardown after writing it.
+        report["shutdown"] = {"status": "running"}
+        persist()
+        try:
+            _shutdown_gpu_worker(resources.pop())
+            report["shutdown"]["status"] = "completed"
+        except Exception:
+            report["shutdown"].update(status="failed", error=traceback.format_exc())
+            report["status"] = "partial"
+            failed = True
+        persist()
+        (args.output / "REPORT.md").write_text(_markdown_report(report))
+        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+            for path in sorted(args.output.iterdir()):
+                if path.is_file():
+                    bundle.write(path, f"{args.output.name}/{path.name}")
     return 1 if failed or report["status"] == "partial" else 0
+
+
+def _shutdown_gpu_worker(worker):
+    # vLLM 0.11's in-process core exposes shutdown explicitly. The outer
+    # residual launcher records native crashes and repackages final files.
+    from vllm.distributed.parallel_state import cleanup_dist_env_and_memory
+    torch.cuda.synchronize()
+    engine = getattr(getattr(worker, "rollout", None), "inference_engine", None)
+    if engine is not None:
+        engine.llm_engine.engine_core.shutdown()
+    cleanup_dist_env_and_memory()
