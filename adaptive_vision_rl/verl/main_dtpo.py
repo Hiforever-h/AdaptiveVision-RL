@@ -22,7 +22,7 @@ def load_config(path: str, overrides: list[str]):
     return config
 
 
-def run_dtpo(config):
+def run_dtpo(config, *, probe_steps=None, probe_output=None):
     from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 
     if not ray.is_initialized():
@@ -34,12 +34,12 @@ def run_dtpo(config):
         )
         ray.init(**OmegaConf.to_container(ray_kwargs, resolve=True))
     runner = DTPOTaskRunner.remote()
-    ray.get(runner.run.remote(config))
+    ray.get(runner.run.remote(config, probe_steps=probe_steps, probe_output=probe_output))
 
 
 @ray.remote(num_cpus=1)
 class DTPOTaskRunner:
-    def run(self, config):
+    def run(self, config, *, probe_steps=None, probe_output=None):
         from pprint import pprint
 
         from verl.single_controller.ray import RayWorkerGroup
@@ -183,7 +183,22 @@ class DTPOTaskRunner:
         # verl-agent's actor only selects loss_mask when this metadata switch is on.
         # It is enabled after trainer validation so the built-in tool engine remains off.
         config.actor_rollout_ref.rollout.multi_turn.enable = True
-        trainer.fit()
+        if probe_steps is None:
+            trainer.fit()
+        else:
+            import json
+            from adaptive_vision_rl.verl.short_run import install_short_run
+            recorder, restore = install_short_run(trainer, steps=probe_steps, output=probe_output)
+            try:
+                (Path(probe_output) / "effective_config.json").write_text(
+                    json.dumps(OmegaConf.to_container(config, resolve=True), ensure_ascii=False, indent=2) + "\n")
+                trainer.fit()
+                recorder.finish()
+            except BaseException as exc:
+                recorder.fail(exc)
+                raise
+            finally:
+                restore()
 
 
 def main():
@@ -193,8 +208,13 @@ def main():
         default="configs/dtpo_qwen3vl_4b_lora.yaml",
         help="Project override YAML merged on top of verl-agent ppo_trainer.yaml",
     )
+    parser.add_argument("--probe-steps", type=int, choices=[10], help="Fresh 10-step diagnostic; preserve the full scheduler horizon")
+    parser.add_argument("--probe-output", type=Path, help="Local directory for per-step metrics and completion state")
     args, overrides = parser.parse_known_args()
-    run_dtpo(load_config(args.config, overrides))
+    if (args.probe_steps is None) != (args.probe_output is None):
+        parser.error("--probe-steps and --probe-output must be supplied together")
+    run_dtpo(load_config(args.config, overrides), probe_steps=args.probe_steps,
+             probe_output=str(args.probe_output.resolve()) if args.probe_output is not None else None)
 
 
 if __name__ == "__main__":

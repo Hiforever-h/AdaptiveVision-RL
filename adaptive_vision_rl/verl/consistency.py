@@ -225,7 +225,7 @@ def _configure_process(seed):
 
 
 def _actor_log_probs(worker, batch, *, remove_padding, micro_batch_size, adapter=True, temperature=1.0,
-                     fp32_head=False, fp32_logprob=False, no_reduced_bf16=False, trace=None):
+                     fp32_head=False, fp32_logprob=False, no_reduced_bf16=False, trace=None, calculate_entropy=False):
     from verl.protocol import pad_dataproto_to_divisor
     from verl.utils.fsdp_utils import load_fsdp_model_to_gpu, offload_fsdp_model_to_cpu
 
@@ -252,13 +252,54 @@ def _actor_log_probs(worker, batch, *, remove_padding, micro_batch_size, adapter
                 worker.actor_module_fsdp, fp32_head=fp32_head, no_reduced_bf16=no_reduced_bf16,
                 logprob_module=logprob_module), trace_context:
             with torch.no_grad():
-                values, _ = worker.actor.compute_log_prob(data.to(torch.cuda.current_device()), calculate_entropy=False)
+                values, _ = worker.actor.compute_log_prob(data.to(torch.cuda.current_device()), calculate_entropy=calculate_entropy)
         return values[:count].detach().float().cpu()
     finally:
         worker.actor.use_remove_padding = previous
         if worker._is_offload_param:
             offload_fsdp_model_to_cpu(worker.actor_module_fsdp)
         torch.cuda.empty_cache()
+
+
+def _evaluate_update_forwards(worker, batch, case, values, *, temperature, persist):
+    from verl.protocol import pad_dataproto_to_divisor
+    from verl.utils.fsdp_utils import load_fsdp_model_to_gpu, offload_fsdp_model_to_cpu
+    from adaptive_vision_rl.verl.update_diagnostics import update_mode_log_probs
+
+    case["update_forward_evidence"] = {}
+    for phase in ("actor_old_micro4", "actor_old_micro2", "actor_update_micro2", "actor_update_micro2_repeat"):
+        print(f"  {phase}", flush=True)
+        try:
+            if phase.startswith("actor_old"):
+                values[phase] = _actor_log_probs(
+                    worker, batch, remove_padding=worker.config.model.use_remove_padding,
+                    micro_batch_size=4 if phase.endswith("4") else 2,
+                    temperature=temperature, calculate_entropy=True)
+            else:
+                data = batch.select(batch_keys=["input_ids", "responses", "attention_mask", "position_ids"],
+                                    non_tensor_batch_keys=["multi_modal_inputs"], deepcopy=True)
+                count = len(data)
+                data, _ = pad_dataproto_to_divisor(data, 2)
+                evidence = case["update_forward_evidence"].setdefault(phase, {})
+                if worker._is_offload_param:
+                    load_fsdp_model_to_gpu(worker.actor_module_fsdp)
+                try:
+                    with worker.ulysses_sharding_manager:
+                        data = worker.ulysses_sharding_manager.preprocess_data(data.to(torch.cuda.current_device()))
+                        micro_batches = ({**micro.batch, **micro.non_tensor_batch}
+                                         for micro in data.chunk(len(data) // 2))
+                        values[phase] = update_mode_log_probs(worker.actor, micro_batches,
+                                                              temperature=temperature, evidence=evidence)[:count]
+                finally:
+                    if worker._is_offload_param:
+                        offload_fsdp_model_to_cpu(worker.actor_module_fsdp)
+        except Exception:
+            case["errors"][phase] = traceback.format_exc()
+            print(case["errors"][phase], file=sys.stderr, flush=True)
+        finally:
+            gc.collect()
+            torch.cuda.empty_cache()
+            persist()
 
 
 def _evaluate_actor_variants(worker, batch, case, values, *, micro, remove_padding, temperature,
@@ -414,8 +455,9 @@ def _sample_records(batch, images, generation_outputs, tokenizer, values, top_k)
         row_values = {name: tensor[index][mask].tolist() for name, tensor in values.items()}
         row_values = {name: [v if math.isfinite(v) else None for v in seq] for name, seq in row_values.items()}
         top = []
-        if "actor_training" in values:
-            left, right = values["rollout"][index], values["actor_training"][index]
+        comparison_phase = "actor_old_micro4" if "actor_old_micro4" in values else "actor_training"
+        if comparison_phase in values:
+            left, right = values["rollout"][index], values[comparison_phase][index]
             finite = mask & torch.isfinite(left) & torch.isfinite(right)
             diff = (left.exp() - right.exp()).abs().masked_fill(~finite, -1)
             for offset in diff.topk(min(top_k, int(finite.sum()))).indices.tolist():
@@ -499,6 +541,12 @@ def _run_gpu(args, report, persist):
         "Replay source effective_config; .pt does not encode LoRA alpha" if replay_source else
         "config YAML plus CLI overrides; .pt does not encode LoRA alpha")
     rollout = config.actor_rollout_ref.rollout
+    update_probe = bool(getattr(args, "update_forward_diagnostics", False))
+    if update_probe and (int(config.actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu) != 2
+                         or config.actor_rollout_ref.actor.entropy_coeff != 0
+                         or config.actor_rollout_ref.actor.use_dynamic_bsz
+                         or int(config.actor_rollout_ref.actor.get("ulysses_sequence_parallel_size", 1)) != 1):
+        raise ValueError("Update probe requires actor micro=2, entropy_coeff=0, fixed batches and SP=1")
     if (rollout.name != "vllm" or rollout.mode != "sync" or rollout.tensor_model_parallel_size != 1
             or rollout.n != 1 or config.actor_rollout_ref.actor.strategy != "fsdp"
             or config.actor_rollout_ref.model.lora_rank <= 0):
@@ -644,10 +692,13 @@ def _run_gpu(args, report, persist):
         temperature = float(rollout.temperature)
         micro = int(rollout.log_prob_micro_batch_size_per_gpu)
         original_rmpad = bool(config.actor_rollout_ref.model.use_remove_padding)
-        _evaluate_actor_variants(worker, batch, case, values, micro=micro, remove_padding=original_rmpad,
+        if update_probe:
+            _evaluate_update_forwards(worker, batch, case, values, temperature=temperature, persist=persist)
+        else:
+            _evaluate_actor_variants(worker, batch, case, values, micro=micro, remove_padding=original_rmpad,
                                  temperature=temperature, diagnostic_records=saved if args.forward_diagnostics else None,
                                  output=args.output, persist=persist)
-        for phase, enabled in [("vllm_prefill", True), ("vllm_base_prefill", False)]:
+        for phase, enabled in ([] if update_probe else [("vllm_prefill", True), ("vllm_base_prefill", False)]):
             print(f"  {phase}", flush=True)
             try:
                 values[phase], case[phase + "_alignment"] = _teacher_forced_log_probs(worker, batch, raw_prompts, images, adapter=enabled)
@@ -670,6 +721,8 @@ def _run_gpu(args, report, persist):
         for left, right in comparisons:
             if left in values and right in values:
                 case["comparisons"][f"{left}_vs_{right}"] = probability_difference(values[left], values[right], mask)
+        if update_probe:
+            _record_update_comparisons(case, values, mask, config.actor_rollout_ref.actor)
         case["rows"] = len(batch)
         case["response_tokens"] = int(mask.sum())
         case["sampling_temperature"] = temperature
@@ -700,7 +753,10 @@ def _run_gpu(args, report, persist):
         values = {name: torch.cat([source[3][name] for source in mixed_sources])[order] for name in shared}
         if "actor_training" in values:
             values["actor_separate_turns"] = values.pop("actor_training")
-        if args.forward_diagnostics:
+        if update_probe:
+            values = {name: value for name, value in values.items() if not name.startswith("actor_")}
+            _evaluate_update_forwards(worker, batch, case, values, temperature=temperature, persist=persist)
+        elif args.forward_diagnostics:
             # Every actor control must actually run with the mixed grouping.
             # Keep only the explicitly named separate-turn reference and vLLM data.
             values = {name: value for name, value in values.items()
@@ -734,6 +790,8 @@ def _run_gpu(args, report, persist):
         for left, right in comparisons:
             if left in values and right in values:
                 case["comparisons"][f"{left}_vs_{right}"] = probability_difference(values[left], values[right], mask)
+        if update_probe:
+            _record_update_comparisons(case, values, mask, config.actor_rollout_ref.actor)
         case.update(rows=len(batch), response_tokens=int(mask.sum()), sampling_temperature=temperature,
                     actor_micro_batch_size=micro, actor_remove_padding=original_rmpad,
                     note="Reuses the exact responses above; only actor row grouping changes, interleaving one-image/two-image rows.")
@@ -750,15 +808,27 @@ def _run_gpu(args, report, persist):
     report["precision_controls_restored"] = (
         torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction
         == report["runtime"]["cuda_matmul_allow_bf16_reduced_precision_reduction"])
-    incomplete = (not report["precision_controls_restored"] or any(
+    incomplete = (not report["actor_weights_unchanged"] or not report["precision_controls_restored"] or any(
                       case["errors"] or any(value["nonfinite_tokens"] for value in case["comparisons"].values())
+                      or any(value["nonfinite_tokens"] for value in case.get("update_ratios", {}).values())
                       or not case.get("forward_diagnostics", {}).get("all_captures_valid", True)
                       for case in report["cases"])
                   or any("inspection_error" in event for event in report["sync_events"]))
     report["status"] = "partial" if incomplete else "completed"
 
 
+def _record_update_comparisons(case, values, mask, actor_config):
+    from adaptive_vision_rl.verl.update_diagnostics import update_comparisons
+    low = actor_config.clip_ratio_low
+    high = actor_config.clip_ratio_high
+    case["comparisons"], case["update_ratios"] = update_comparisons(
+        values, mask, clip_low=float(actor_config.clip_ratio if low is None else low),
+        clip_high=float(actor_config.clip_ratio if high is None else high))
+
+
 def _markdown_report(report):
+    if report.get("update_forward_diagnostics"):
+        return _update_markdown_report(report)
     lines = ["# 训推一致性验证报告", "", f"状态：`{report['status']}`", "",
              f"Checkpoint：`{report['checkpoint']}`", "",
              "该脚本不更新参数，不保存或删除 checkpoint；读取完整 .pt 中的模型权重，不依赖独立 adapter 文件。", "",
@@ -832,6 +902,40 @@ def _markdown_report(report):
     return "\n".join(lines)
 
 
+def _update_markdown_report(report):
+    lines = ["# micro-batch=2 真实更新模式前向验证", "", f"状态：`{report['status']}`", "",
+             f"Checkpoint：`{report['checkpoint']}`", "",
+             "固定原报告的输入和回答；rollout 概率沿用原报告。本轮不重新采样、不运行 vLLM prefill、不改变计算精度。",
+             "旧概率通过真实 compute_log_prob（eval/no_grad，含 entropy 计算）分别按 4/2 条重算。",
+             "更新概率直接调用 PPO 的 _forward_micro_batch：train、启用梯度、启用 gradient checkpointing，每批 2 条。",
+             "仅前向，不调用 backward 或 optimizer；独立短训才执行真实参数更新。", "",
+             f"Checkpoint 与 actor LoRA 一致：`{report.get('checkpoint_lora_matches_actor', '未完成')}`。",
+             f"前向前后 actor LoRA 未改变：`{report.get('actor_weights_unchanged', '未完成')}`。",
+             f"源 checkpoint 文件未改变：`{report.get('checkpoint_file_unchanged', '未完成')}`。", "",
+             "ratio = exp(后者 logprob − 前者 logprob)，在任何参数更新之前计算。",
+             "超界比例按配置的 PPO clip 边界统计；它不是 pg_clipfrac，后者还依赖 advantage 的符号。", "",
+             "| 场景 | 对照 | ratio min | ratio max | 超界比例 | 概率差 mean | 概率差 max | 非有限 token |",
+             "|---|---|---:|---:|---:|---:|---:|---:|"]
+    for case in report["cases"]:
+        for name, ratio in case.get("update_ratios", {}).items():
+            diff = case["comparisons"][name]
+            numbers = [f"{ratio[key]:.6f}" if key in ratio else "n/a" for key in ("min", "max", "fraction_outside_bounds")]
+            differences = [f"{diff[key]:.6f}" if key in diff else "n/a" for key in ("mean", "max")]
+            lines.append(f"| {case['name']} | {name} | {' | '.join(numbers + differences)} | {ratio['nonfinite_tokens']} |")
+        for phase, evidence in case.get("update_forward_evidence", {}).items():
+            lines.extend(["", f"{case['name']}/{phase}：真实模式证据有效 `{evidence.get('valid', False)}`；"
+                          f"模式已恢复 `{evidence.get('training_modes_restored', False)}`。"])
+        for phase, error in case["errors"].items():
+            lines.extend(["", f"失败：{case['name']}/{phase}", "```text", error, "```"])
+    lines.extend(["", "重点比较 old_micro4→update_micro2 与 old_micro2→update_micro2：后者是否使无更新时的 ratio 更接近 1、减少超界。",
+                  "update_micro2 的重复对照检查本次前向稳定性。mixed_turns 混合单图/双图，复用相同 token，不能与另两场景相加当成独立样本。",
+                  "completed 只表示检查执行完毕，不表示差异可接受或长期训练稳定。",
+                  "逐 token 数据见 *_samples.json；模式证据、完整 ratio 分布、概率差、配置和版本见 report.json。", ""])
+    if report.get("fatal_error"):
+        lines.extend(["```text", report["fatal_error"], "```", ""])
+    return "\n".join(lines)
+
+
 def run_verification(args):
     args.output = args.output.expanduser().resolve()
     args.checkpoint = args.checkpoint.expanduser().resolve()
@@ -850,6 +954,7 @@ def run_verification(args):
         "seed": args.seed, "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "read_only": True, "model_weights_only": True,
         "forward_diagnostics": bool(getattr(args, "forward_diagnostics", False)),
+        "update_forward_diagnostics": bool(getattr(args, "update_forward_diagnostics", False)),
         "project_commit": _git_revision(Path(__file__).resolve().parents[2]),
     }
     checkpoint_file = args.checkpoint / "actor/model_world_size_1_rank_0.pt"

@@ -144,3 +144,55 @@ DeepStack 特征差。`REPORT.md` 同时给出这些 token 在不同控制下的
 
 诊断过程不调用 backward / optimizer，也不写入 checkpoint 或 adapter。结束后提供
 新生成的 `.zip`，即可继续区分同步之外的前向差异。
+
+## 真实更新模式 micro-batch=2 与 SFT 10 步短训
+
+同步代码后，在原服务器环境、项目根目录运行：
+
+```bash
+conda activate bisight-rl
+CUDA_VISIBLE_DEVICES=0 python -m scripts.run_dtpo_micro2_probe \
+  --replay-report /root/autodl-tmp/outputs/rollout_consistency_step300_20261007_214712
+```
+
+源目录需要包含 `report.json` 和三份 `*_samples.json`。该入口依次启动两个独立进程，
+前一阶段退出并释放显存后才开始后一阶段：
+
+1. 只加载 step 300 的模型权重，固定原输入和回答。旧概率使用真实
+   `compute_log_prob`（eval/no_grad、计算 entropy），分别按 micro=4 和 micro=2 重算。
+   更新前向直接调用真实 `_forward_micro_batch`，使用 train、启用梯度、启用非重入
+   gradient checkpointing、micro=2，并重复一次。覆盖单图、双图及交错混合场景。
+   不调用 backward/optimizer，不运行原有 18 项精度/布局控制，不重新运行 vLLM prefill。
+2. **从 SFT 基座新建 LoRA，关闭自动恢复，训练 step 1–10**。旧概率和更新都使用 micro=2，
+   其他模型精度、采样、PPO、DTPO 参数沿用源报告。worker 按完整训练长度初始化
+   optimizer/scheduler 后，才把 driver 的停止条件改为 10，因此学习率及 warmup
+   与完整新训练的前 10 步一致。关闭 checkpoint 保存、全量验证及 WandB；
+   输出逐步本地指标和 rollout 文本。只修改这次短训配置，不修改默认训练 YAML。
+
+旧 step 300 保留用于重现异常，不用于初始化这次短训。当前 LoRA 训练和 checkpoint
+导出代码没有自动合并 adapter 或写回 SFT 基座目录的步骤；先前评估的图片处理问题
+会影响评估输入和结果，不会因此把错误权重写入 SFT 基座。
+
+前向报告比较 `exp(update_logprob - old_logprob)`：重点看旧概率统一为 2 后，
+无参数更新时的 ratio 是否更接近 1，以及超出实际 PPO clip 边界的比例是否下降。
+这个超界比例不是训练的 `pg_clipfrac`，后者还依赖 advantage 符号。
+重复前向和 train/grad/checkpointing 的实际 hook 证据也会记录。
+
+默认输出 `/root/autodl-tmp/outputs/dtpo_micro2_step10_时间戳/`，结束时打印同名 zip：
+
+- `REPORT.md`：两阶段状态、10 步概率差、PPO clipping/KL、梯度范数、学习率和任务指标。
+- `forward/REPORT.md` / `forward/report.json` / `forward/*_samples.json`：前向对照和逐 token 数据。
+- `train/metrics.jsonl` / `train/run_state.json`：每步完整指标、实际步数、scheduler horizon 和 warmup。
+- `train/rollouts/`：这 10 步的 rollout 文本。
+- `short_train_config.json` / `train/effective_config.json`：启动和实际运行配置。
+- `forward.log` / `train.log` / `run.json`：日志、源报告 SHA256 与失败堆栈。
+
+下载整个 zip 即可，不包含模型/adapter 权重。失败也会打包已有结果；前向检查未完成或
+出现非有限 token 时不会开始短训。`completed` 表示阶段执行完成，不能代替概率差的
+人工评估；10 步也不足以证明最终精度或长期稳定性。需要单独运行前向时可使用：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -m scripts.verify_rollout_consistency \
+  --replay-report /root/autodl-tmp/outputs/rollout_consistency_step300_20261007_214712 \
+  --update-forward-diagnostics
+```

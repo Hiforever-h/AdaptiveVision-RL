@@ -31,10 +31,13 @@ def main():
     parser.add_argument("--allow-version-mismatch", action="store_true")
     parser.add_argument("--replay-report", type=Path, help="Reuse the saved configuration, samples and responses from an earlier report directory")
     parser.add_argument("--forward-diagnostics", action="store_true", help="Replay focus tokens with repeated, base-only and precision-controlled actor forwards")
+    parser.add_argument("--update-forward-diagnostics", action="store_true", help="Only compare old-policy micro=4/2 with real train/grad/checkpointing micro=2 forwards")
     parser.add_argument("--override", action="append", default=[], metavar="KEY=VALUE", help="Training config override; repeat for multiple keys")
     args = parser.parse_args()
-    if args.forward_diagnostics and args.replay_report is None:
-        parser.error("--forward-diagnostics requires --replay-report to preserve the anomalous tokens")
+    if (args.forward_diagnostics or args.update_forward_diagnostics) and args.replay_report is None:
+        parser.error("Forward diagnostics require --replay-report to preserve the anomalous tokens")
+    if args.forward_diagnostics and args.update_forward_diagnostics:
+        parser.error("Choose only one forward diagnostic mode")
     if args.replay_report and (args.samples is not None or args.offset or args.override or args.max_response_tokens is not None):
         parser.error("Replay preserves the original samples/configuration; omit samples/offset/override/max-response-tokens")
     if args.samples is None:
