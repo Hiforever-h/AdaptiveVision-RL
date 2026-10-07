@@ -159,6 +159,28 @@ class LoraSyncTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Incomplete.*q_proj"):
             collect_lora_params(self.actor)
 
+    def test_nested_fsdp_paths_export_canonical_names_without_duplicate_aliases(self):
+        expected = collect_lora_params(self.actor)
+
+        class Wrapper(self.torch.nn.Module):
+            def __init__(self, wrapped):
+                super().__init__()
+                self._fsdp_wrapped_module = wrapped
+
+            def __getattr__(self, name):
+                try:
+                    return super().__getattr__(name)
+                except AttributeError:
+                    return getattr(self._fsdp_wrapped_module, name)
+
+        model = self.actor.base_model.model
+        model.q_proj = Wrapper(model.q_proj)
+        model.k_proj = Wrapper(model.k_proj)
+        actual = collect_lora_params(self.actor)
+        self.assertEqual(set(actual), set(expected))
+        for name in expected:
+            self.torch.testing.assert_close(actual[name], expected[name], rtol=0, atol=0)
+
     def test_collector_rejects_empty_adapter(self):
         for child in self.actor.modules():
             for matrix in ("lora_A", "lora_B"):

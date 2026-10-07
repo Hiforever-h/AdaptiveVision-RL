@@ -23,9 +23,9 @@ def collect_lora_params(module) -> dict:
     model = module._fsdp_wrapped_module if is_fsdp else module
     context = FSDP.summon_full_params(module, writeback=False) if is_fsdp else nullcontext()
     with context:
-        # An unwrapped PEFT model's state_dict() can expose flattened FSDP
-        # parameters instead of named A/B weights. Read the actual LoRA layers
-        # while their nested FSDP parameters are materialized instead.
+        # Newer PEFT derives adapter keys from named_modules(), whose nested
+        # FSDP wrapper paths differ from canonical state_dict() keys. Read the
+        # actual LoRA layers while their FSDP parameters are materialized.
         tensors = {}
         for name, child in model.named_modules():
             # FSDP delegates attribute access to its wrapped module. Restrict

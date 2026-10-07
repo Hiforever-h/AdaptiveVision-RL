@@ -22,9 +22,15 @@ import zipfile
 from collections import Counter
 from contextlib import nullcontext, redirect_stderr, redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import torch
+
+from adaptive_vision_rl.verl.forward_diagnostics import (
+    ForwardTrace, actor_variants, extra_comparisons, focus_tokens,
+    precision_control, replay_tensors, trace_reference,
+)
 
 
 def object_array(items):
@@ -218,7 +224,8 @@ def _configure_process(seed):
     torch.cuda.manual_seed_all(seed)
 
 
-def _actor_log_probs(worker, batch, *, remove_padding, micro_batch_size, adapter=True, temperature=1.0):
+def _actor_log_probs(worker, batch, *, remove_padding, micro_batch_size, adapter=True, temperature=1.0,
+                     fp32_head=False, fp32_logprob=False, no_reduced_bf16=False, trace=None):
     from verl.protocol import pad_dataproto_to_divisor
     from verl.utils.fsdp_utils import load_fsdp_model_to_gpu, offload_fsdp_model_to_cpu
 
@@ -235,7 +242,15 @@ def _actor_log_probs(worker, batch, *, remove_padding, micro_batch_size, adapter
         load_fsdp_model_to_gpu(worker.actor_module_fsdp)
     try:
         context = nullcontext() if adapter else worker.actor.actor_module.disable_adapter()
-        with worker.ulysses_sharding_manager, context:
+        logprob_module = None
+        if fp32_logprob:
+            from verl.workers.actor import dp_actor
+            logprob_module = dp_actor
+        trace_context = (trace.attach(worker.actor_module_fsdp, data, micro_batch_size=micro_batch_size,
+                                      remove_padding=remove_padding) if trace is not None else nullcontext())
+        with worker.ulysses_sharding_manager, context, precision_control(
+                worker.actor_module_fsdp, fp32_head=fp32_head, no_reduced_bf16=no_reduced_bf16,
+                logprob_module=logprob_module), trace_context:
             with torch.no_grad():
                 values, _ = worker.actor.compute_log_prob(data.to(torch.cuda.current_device()), calculate_entropy=False)
         return values[:count].detach().float().cpu()
@@ -244,6 +259,61 @@ def _actor_log_probs(worker, batch, *, remove_padding, micro_batch_size, adapter
         if worker._is_offload_param:
             offload_fsdp_model_to_cpu(worker.actor_module_fsdp)
         torch.cuda.empty_cache()
+
+
+def _evaluate_actor_variants(worker, batch, case, values, *, micro, remove_padding, temperature,
+                             diagnostic_records, output, persist):
+    enabled = diagnostic_records is not None
+    focuses = focus_tokens(diagnostic_records) if enabled else []
+    traces, references = {"focus_tokens": focuses, "phases": {}}, {}
+    required_references = {"actor_training", "actor_base_training", "actor_fp32_head_training",
+                           "actor_no_reduced_bf16_training", "actor_precise_head_training"}
+    for phase, options in actor_variants(micro=micro, remove_padding=remove_padding,
+                                         temperature=temperature, diagnostics=enabled):
+        print(f"  {phase}", flush=True)
+        try:
+            trace = ForwardTrace(focuses) if enabled else None
+            values[phase] = _actor_log_probs(worker, batch, trace=trace, **options)
+            if trace is not None:
+                if phase in required_references:
+                    references[phase] = trace
+                reference_name = trace_reference(phase)
+                reference = references[reference_name]
+                summary = trace.compare(reference)
+                summary["reference_phase"] = reference_name
+                summary["controls"] = options
+                summary["focus_probabilities"] = []
+                for focus in focuses:
+                    probability = float(values[phase][focus["row"], focus["response_offset"]].exp())
+                    summary["focus_probabilities"].append(
+                        {**focus, "probability": probability if math.isfinite(probability) else None})
+                traces["phases"][phase] = summary
+                print(f"    captured {summary['capture_count']} activations; first changed captured stage: "
+                      f"{summary['first_nonidentical_captured_stage']}; focus probabilities: "
+                      f"{[round(item['probability'], 6) if item['probability'] is not None else None for item in summary['focus_probabilities']]}", flush=True)
+        except Exception:
+            case["errors"][phase] = traceback.format_exc()
+            print(case["errors"][phase], file=sys.stderr, flush=True)
+            torch.cuda.empty_cache()
+        if enabled:
+            filename = f"{case['name']}_forward_trace.json"
+            case["forward_diagnostics"] = {
+                "trace_file": filename, "focus_tokens": focuses,
+                "all_captures_valid": bool(traces["phases"]) and not case["errors"] and all(
+                    entry["all_finite"] and not entry["missing"] and not entry["unexpected"]
+                    and all(item["probability"] is not None for item in entry["focus_probabilities"])
+                    for entry in traces["phases"].values()),
+                "first_nonidentical_captured_stages": {
+                    name: entry["first_nonidentical_captured_stage"] for name, entry in traces["phases"].items()
+                },
+                "phases": {
+                    name: {"reference_phase": entry["reference_phase"],
+                           "focus_probabilities": entry["focus_probabilities"]}
+                    for name, entry in traces["phases"].items()
+                },
+            }
+            _write_json(output / filename, traces)
+        persist()
 
 
 def _teacher_forced_log_probs(worker, batch, raw_prompts, image_groups, *, adapter):
@@ -296,7 +366,7 @@ def _reference_actions(rows):
     return actions
 
 
-def _make_batch(worker, collector, rows, observation):
+def _make_batch(worker, collector, rows, observation, replay_records=None):
     from verl import DataProto
 
     dummy = DataProto.from_dict(
@@ -314,8 +384,21 @@ def _make_batch(worker, collector, rows, observation):
         batch_keys=["input_ids", "attention_mask", "position_ids"],
         non_tensor_batch_keys=non_tensor_keys,
     )
-    # Exactly the normal rollout worker method, including sharding-manager sync.
-    output = worker.generate_sequences(generation)
+    if replay_records is None:
+        # Exactly the normal rollout worker method, including sharding-manager sync.
+        output = worker.generate_sequences(generation)
+    else:
+        for index, record in enumerate(replay_records):
+            if str(rows[index]["env_kwargs"]["sample_id"]) != record["anchor"]["sample_id"]:
+                raise ValueError(f"Replay sample order changed at row {index}")
+            if [list(image.size) for image in images[index]] != record["image_sizes"]:
+                raise ValueError(f"Replay image sizes changed at row {index}")
+            if batch.non_tensor_batch["multi_modal_inputs"][index]["image_grid_thw"].tolist() != record["image_grid_thw"]:
+                raise ValueError(f"Replay image grids changed at row {index}")
+        output = DataProto.from_dict(tensors=replay_tensors(
+            generation.batch, replay_records, response_width=worker.config.rollout.response_length,
+            pad_token_id=worker.tokenizer.pad_token_id,
+        ))
     batch = batch.union(output)
     return batch, raw_prompts, images
 
@@ -388,12 +471,33 @@ def _run_gpu(args, report, persist):
     )
     if actual_revision != expected_revision and not args.allow_version_mismatch:
         raise ValueError("verl checkout does not match third_party/verl-agent.commit; use the training checkout or explicitly pass --allow-version-mismatch")
-    config = OmegaConf.merge(
-        OmegaConf.load(Path(verl.__file__).resolve().parent / "trainer/config/ppo_trainer.yaml"),
-        OmegaConf.load(args.config), OmegaConf.from_dotlist(args.override),
-    )
+    replay_source, replay_records = None, {}
+    if getattr(args, "replay_report", None):
+        source_path = args.replay_report.expanduser().resolve()
+        if source_path.is_dir():
+            source_path = source_path / "report.json"
+        replay_source = json.loads(source_path.read_text())
+        if replay_source["status"] != "completed" or not replay_source["checkpoint_lora_matches_actor"]:
+            raise ValueError("Replay requires a completed source report with matching checkpoint weights")
+        config = OmegaConf.create(replay_source["effective_config"])
+        for case in replay_source["cases"]:
+            name = case["name"]
+            replay_records[name] = json.loads((source_path.parent / f"{name}_samples.json").read_text())
+        if "decision" not in replay_records:
+            raise ValueError("Replay source is missing the decision scenario")
+        report["replay"] = {"source_report": str(source_path), "source_report_sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+                            "source_project_commit": replay_source.get("project_commit"),
+                            "rollout_probabilities": "Reused from source report; responses are not resampled",
+                            "generation_alignment": "Reconstructed inputs are checked against the original generation inputs"}
+    else:
+        config = OmegaConf.merge(
+            OmegaConf.load(Path(verl.__file__).resolve().parent / "trainer/config/ppo_trainer.yaml"),
+            OmegaConf.load(args.config), OmegaConf.from_dotlist(args.override),
+        )
     OmegaConf.resolve(config)
-    report["checkpoint_lora_config_source"] = "config YAML plus CLI overrides; .pt does not encode LoRA alpha"
+    report["checkpoint_lora_config_source"] = (
+        "Replay source effective_config; .pt does not encode LoRA alpha" if replay_source else
+        "config YAML plus CLI overrides; .pt does not encode LoRA alpha")
     rollout = config.actor_rollout_ref.rollout
     if (rollout.name != "vllm" or rollout.mode != "sync" or rollout.tensor_model_parallel_size != 1
             or rollout.n != 1 or config.actor_rollout_ref.actor.strategy != "fsdp"
@@ -418,9 +522,17 @@ def _run_gpu(args, report, persist):
     config.actor_rollout_ref.actor.optim.total_training_steps = max(1, int(config.actor_rollout_ref.actor.optim.get("total_training_steps") or 0))
     report["effective_config"] = OmegaConf.to_container(config, resolve=True)
     (args.output / "effective_config.yaml").write_text(OmegaConf.to_yaml(config, resolve=True))
-    rows = pq.read_table(args.parquet).to_pylist()[args.offset:args.offset + args.samples]
-    if len(rows) != args.samples:
-        raise ValueError("Selected parquet slice contains fewer rows than --samples")
+    all_rows = pq.read_table(args.parquet).to_pylist()
+    if replay_source is not None:
+        selected = replay_source["selected_samples"]
+        matches = {sample: [row for row in all_rows if str(row["env_kwargs"]["sample_id"]) == sample] for sample in selected}
+        if any(len(rows) != 1 for rows in matches.values()):
+            raise ValueError("Source report sample IDs are missing or duplicated in the parquet")
+        rows = [matches[sample][0] for sample in selected]
+    else:
+        rows = all_rows[args.offset:args.offset + args.samples]
+        if len(rows) != args.samples:
+            raise ValueError("Selected parquet slice contains fewer rows than --samples")
     report["selected_samples"] = [str(row["env_kwargs"]["sample_id"]) for row in rows]
     persist()
 
@@ -447,6 +559,10 @@ def _run_gpu(args, report, persist):
     report["checkpoint_lora_matches_actor"] = report["checkpoint_lora"] == report["loaded_actor_lora"]
     if not report["checkpoint_lora_matches_actor"]:
         raise RuntimeError("The loaded actor LoRA does not match the checkpoint")
+    if replay_source is not None:
+        report["replay"]["actor_lora_matches_source"] = report["loaded_actor_lora"] == replay_source["loaded_actor_lora"]
+        if not report["replay"]["actor_lora_matches_source"]:
+            raise ValueError("Current checkpoint LoRA differs from the replay source")
     del live
     report["sync_events"] = []
     manager = worker.rollout_sharding_manager
@@ -480,6 +596,7 @@ def _run_gpu(args, report, persist):
         "vllm_prefix_caching": vllm_config.cache_config.enable_prefix_caching,
         "float32_matmul_precision": torch.get_float32_matmul_precision(),
         "cuda_matmul_allow_tf32": torch.backends.cuda.matmul.allow_tf32,
+        "cuda_matmul_allow_bf16_reduced_precision_reduction": torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction,
         "flags": {key: os.environ.get(key) for key in ["VLLM_USE_V1", "VLLM_ENABLE_V1_MULTIPROCESSING", "VLLM_ATTENTION_BACKEND", "PYTORCH_CUDA_ALLOC_CONF"]},
     }
     original_generate = engine.generate
@@ -501,7 +618,7 @@ def _run_gpu(args, report, persist):
     environment = AdaptiveVisionEnvironmentManager(config, processor, is_train=False)
     initial_observation, _ = environment.reset([row["env_kwargs"] for row in rows])
     observations = [("decision", initial_observation)]
-    if not args.skip_reference_second_turn:
+    if not args.skip_reference_second_turn and (replay_source is None or "reference_second_turn" in replay_records):
         observation, _, done, _ = environment.step(_reference_actions(rows))
         if np.asarray(done).any():
             raise RuntimeError("Controlled tool requests did not produce answer-after-tool observations")
@@ -512,31 +629,24 @@ def _run_gpu(args, report, persist):
         print(f"Comparing {name}: {len(rows)} samples...", flush=True)
         case = {"name": name, "errors": {}, "comparisons": {}}
         report["cases"].append(case)
-        batch, raw_prompts, images = _make_batch(worker, collector, rows, observation)
-        generation_outputs = list(captured)
-        case["generation_lora_ids"] = last_request["lora_ids"]
-        case["generation_sampling"] = last_request["sampling"]
-        case["generation_sync_event"] = len(report["sync_events"]) - 1
+        saved = replay_records.get(name)
+        batch, raw_prompts, images = _make_batch(worker, collector, rows, observation, replay_records=saved)
+        if saved is None:
+            generation_outputs = list(captured)
+            case["generation_lora_ids"] = last_request["lora_ids"]
+            case["generation_sampling"] = last_request["sampling"]
+            case["generation_sync_event"] = len(report["sync_events"]) - 1
+        else:
+            generation_outputs = [SimpleNamespace(prompt_token_ids=record["prompt_token_ids"]) for record in saved]
+            case["generation_replayed"] = True
+            case["generation_prompt_alignment_source"] = "Reconstructed prompt vs saved original generation prompt"
         values = {"rollout": batch.batch["rollout_log_probs"].float().cpu()}
         temperature = float(rollout.temperature)
         micro = int(rollout.log_prob_micro_batch_size_per_gpu)
         original_rmpad = bool(config.actor_rollout_ref.model.use_remove_padding)
-        phases = [
-            ("actor_training", dict(remove_padding=original_rmpad, micro_batch_size=micro, temperature=temperature)),
-            ("actor_packed_single", dict(remove_padding=True, micro_batch_size=1, temperature=temperature)),
-            ("actor_padded_single", dict(remove_padding=False, micro_batch_size=1, temperature=temperature)),
-            ("actor_base", dict(remove_padding=False, micro_batch_size=1, adapter=False, temperature=1.0)),
-        ]
-        if temperature != 1.0:
-            phases.append(("actor_raw", dict(remove_padding=original_rmpad, micro_batch_size=micro, temperature=1.0)))
-        for phase, options in phases:
-            print(f"  {phase}", flush=True)
-            try:
-                values[phase] = _actor_log_probs(worker, batch, **options)
-            except Exception:
-                case["errors"][phase] = traceback.format_exc()
-                torch.cuda.empty_cache()
-            persist()
+        _evaluate_actor_variants(worker, batch, case, values, micro=micro, remove_padding=original_rmpad,
+                                 temperature=temperature, diagnostic_records=saved if args.forward_diagnostics else None,
+                                 output=args.output, persist=persist)
         for phase, enabled in [("vllm_prefill", True), ("vllm_base_prefill", False)]:
             print(f"  {phase}", flush=True)
             try:
@@ -555,6 +665,8 @@ def _run_gpu(args, report, persist):
             ("actor_raw" if temperature != 1.0 else "actor_padded_single", "actor_base"),
             ("rollout", "actor_base"),
         ]
+        if args.forward_diagnostics:
+            comparisons.extend(extra_comparisons(values, temperature=temperature))
         for left, right in comparisons:
             if left in values and right in values:
                 case["comparisons"][f"{left}_vs_{right}"] = probability_difference(values[left], values[right], mask)
@@ -588,20 +700,45 @@ def _run_gpu(args, report, persist):
         values = {name: torch.cat([source[3][name] for source in mixed_sources])[order] for name in shared}
         if "actor_training" in values:
             values["actor_separate_turns"] = values.pop("actor_training")
-        try:
-            values["actor_training"] = _actor_log_probs(worker, batch, remove_padding=original_rmpad,
-                                                       micro_batch_size=micro, temperature=temperature)
-        except Exception:
-            case["errors"]["actor_training"] = traceback.format_exc()
-            torch.cuda.empty_cache()
+        if args.forward_diagnostics:
+            # Every actor control must actually run with the mixed grouping.
+            # Keep only the explicitly named separate-turn reference and vLLM data.
+            values = {name: value for name, value in values.items()
+                      if not name.startswith("actor_") or name == "actor_separate_turns"}
+            diagnostic_records = replay_records.get("mixed_turns")
+            if diagnostic_records is None:
+                source_records = replay_records["decision"] + replay_records["reference_second_turn"]
+                diagnostic_records = [source_records[i] for i in order]
+            width = batch.batch["responses"].shape[-1]
+            reconstructed = replay_tensors(
+                {name: batch.batch[name][..., :-width] for name in ("input_ids", "attention_mask", "position_ids")},
+                diagnostic_records, response_width=width, pad_token_id=worker.tokenizer.pad_token_id,
+            )
+            if not torch.equal(reconstructed["responses"], batch.batch["responses"]):
+                raise ValueError("Mixed replay responses differ from the source report")
+            _evaluate_actor_variants(worker, batch, case, values, micro=micro, remove_padding=original_rmpad,
+                                     temperature=temperature, diagnostic_records=diagnostic_records,
+                                     output=args.output, persist=persist)
+        else:
+            try:
+                values["actor_training"] = _actor_log_probs(worker, batch, remove_padding=original_rmpad,
+                                                           micro_batch_size=micro, temperature=temperature)
+            except Exception:
+                case["errors"]["actor_training"] = traceback.format_exc()
+                torch.cuda.empty_cache()
         mask = batch.batch["attention_mask"][:, -batch.batch["responses"].shape[1]:].bool().cpu()
-        for left, right in [("rollout", "actor_training"), ("actor_training", "actor_separate_turns"),
-                            ("actor_training", "actor_packed_single"), ("actor_training", "actor_padded_single")]:
+        comparisons = [("rollout", "actor_training"), ("actor_training", "actor_separate_turns"),
+                       ("actor_training", "actor_packed_single"), ("actor_training", "actor_padded_single")]
+        if args.forward_diagnostics:
+            comparisons.extend(extra_comparisons(values, temperature=temperature))
+        for left, right in comparisons:
             if left in values and right in values:
                 case["comparisons"][f"{left}_vs_{right}"] = probability_difference(values[left], values[right], mask)
         case.update(rows=len(batch), response_tokens=int(mask.sum()), sampling_temperature=temperature,
                     actor_micro_batch_size=micro, actor_remove_padding=original_rmpad,
                     note="Reuses the exact responses above; only actor row grouping changes, interleaving one-image/two-image rows.")
+        if replay_source is not None:
+            case["generation_replayed"] = True
         records = _sample_records(batch, images, generation_outputs, worker.tokenizer, values, args.top_tokens)
         case["generation_prompt_alignment_all_match"] = all(item["generation_prompt_alignment"]["matches"] for item in records)
         _write_json(args.output / "mixed_turns_samples.json", records)
@@ -610,7 +747,12 @@ def _run_gpu(args, report, persist):
     final_lora = tensor_fingerprint(collect_lora_params(worker.actor_module_fsdp))
     report["final_actor_lora"] = final_lora
     report["actor_weights_unchanged"] = final_lora == report["loaded_actor_lora"]
-    incomplete = (any(case["errors"] or any(value["nonfinite_tokens"] for value in case["comparisons"].values())
+    report["precision_controls_restored"] = (
+        torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction
+        == report["runtime"]["cuda_matmul_allow_bf16_reduced_precision_reduction"])
+    incomplete = (not report["precision_controls_restored"] or any(
+                      case["errors"] or any(value["nonfinite_tokens"] for value in case["comparisons"].values())
+                      or not case.get("forward_diagnostics", {}).get("all_captures_valid", True)
                       for case in report["cases"])
                   or any("inspection_error" in event for event in report["sync_events"]))
     report["status"] = "partial" if incomplete else "completed"
@@ -625,12 +767,42 @@ def _markdown_report(report):
              f"源 checkpoint 文件大小与修改时间未改变：`{report.get('checkpoint_file_unchanged', '未完成')}`。", "",
              "`mean/std/max` 为同一批 response token 的概率绝对差；std 使用样本标准差，与训练指标一致。", "",
              "| 场景 | 对照 | mean | std | max | 缺失/非有限 token |", "|---|---|---:|---:|---:|---:|"]
+    if report.get("replay"):
+        lines[4:4] = [
+            f"固定回答重放，来源：`{report['replay']['source_report']}`。", "",
+            "`rollout` 概率沿用原报告；本轮没有重新生成回答。actor 与 vllm_prefill 使用当前代码重算。",
+            "重建输入时核对原 prompt token、位置编码、图像尺寸/grid 和 response；LoRA 指纹必须与原报告相同。", "",
+        ]
     for case in report["cases"]:
         for name, item in case["comparisons"].items():
             numbers = [f"{item[key]:.6f}" if key in item else "n/a" for key in ("mean", "std", "max")]
             lines.append(f"| {case['name']} | {name} | {' | '.join(numbers)} | {item['nonfinite_tokens']} |")
+    for case in report["cases"]:
+        diagnostic = case.get("forward_diagnostics")
+        if not diagnostic:
+            continue
+        focuses = diagnostic["focus_tokens"]
+        lines.extend(["", f"## {case['name']} 固定异常 token 对照", "",
+                      f"激活记录有效：`{diagnostic['all_captures_valid']}`。详见 `{diagnostic['trace_file']}`。", "",
+                      "| 前向阶段 | 激活比较基准 | 最早出现变化的已记录阶段 | "
+                      + " | ".join(f"row {item['row']} / response {item['response_offset']} / ID {item['token_id']} 概率" for item in focuses) + " |",
+                      "|---|---|---|" + "---:|" * len(focuses)])
+        for phase, entry in diagnostic["phases"].items():
+            first = diagnostic["first_nonidentical_captured_stages"][phase] or "记录值完全相同"
+            probabilities = " | ".join(f"{item['probability']:.6f}" if item["probability"] is not None else "n/a"
+                                       for item in entry["focus_probabilities"])
+            lines.append(f"| {phase} | {entry['reference_phase']} | {first} | {probabilities} |")
+        lines.extend(["", "激活只记录选中 token 的预测位置，以及其所在样本的视觉 merger/DeepStack 输出。",
+                      "最早变化阶段仅限这些记录点，不代表已证明该模块是根因；没有记录其他位置或模块内部的运算。"])
+    if report.get("forward_diagnostics"):
+        lines.extend(["", "重复前向及控制后的复算检查稳定性；base 系列均关闭 LoRA并使用温度 1。",
+                      "fp32_logprob 只将 logprob 输入转为 FP32；fp32_head 临时用 FP32 计算输出层，其他层保持原精度。",
+                      "no_reduced_bf16 临时禁止 BF16 GEMM 的低精度 reduction；precise_head 同时启用输出层与 reduction 控制。",
+                      "这些控制仅用于定位，没有写入正式训练配置。概率差改善本身不能证明某个内核或模块实现有错。",
+                      f"临时 BF16 reduction 设置已恢复：`{report.get('precision_controls_restored', '未完成')}`。"])
+    sync_label = "同步编号（重放时首次为 vLLM 固定 token 重算前）" if report.get("replay") else "同步次数（0 为首次采样前）"
     lines.extend(["", "## LoRA 同步检查", "",
-                  "| 同步次数（0 为首次采样前） | 已核对/应核对矩阵 | GPU 槽位与 actor 一致 |", "|---|---:|---|"])
+                  f"| {sync_label} | 已核对/应核对矩阵 | GPU 槽位与 actor 一致 |", "|---|---:|---|"])
     for event in report.get("sync_events", []):
         slots = event.get("gpu_slots", {})
         lines.append(f"| {event['event']} | {slots.get('checked_matrices', '?')}/{slots.get('expected_matrices', '?')} | {slots.get('all_match', '检查失败，见 report.json')} |")
@@ -648,6 +820,7 @@ def _markdown_report(report):
                   "- temperature 非 1 时，vLLM 默认 raw logprobs 与 actor_training 的温度缩放口径不同；使用 actor_raw 对照。",
                   "", "## 文件", "", "- report.json：完整配置、版本、汇总、同步权重检查与失败堆栈。",
                   "- *_samples.json：输入 token、位置编码、逐 token logprob、输出文本及最大差异 token。",
+                  "- *_forward_trace.json（深度诊断模式）：重复/关闭 LoRA/精度对照下的指定位置激活差、logits 和概率。",
                   "- effective_config.yaml / run.log：复现配置与运行日志。", "",
                   "reference_second_turn 由参考框（缺失时用中心框）构造固定双图观察，专门检查第二轮；不是模型自然选择工具的比例。",
                   "各对照共享同一段已经采样的 response。没有把不同生成结果的概率直接相减。", "",
@@ -676,6 +849,7 @@ def run_verification(args):
         "command": sys.argv, "environment": {"python": sys.version, "platform": platform.platform(), "packages": versions},
         "seed": args.seed, "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "read_only": True, "model_weights_only": True,
+        "forward_diagnostics": bool(getattr(args, "forward_diagnostics", False)),
         "project_commit": _git_revision(Path(__file__).resolve().parents[2]),
     }
     checkpoint_file = args.checkpoint / "actor/model_world_size_1_rank_0.pt"

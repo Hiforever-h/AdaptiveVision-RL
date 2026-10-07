@@ -9,6 +9,7 @@ from unittest.mock import patch
 import torch
 
 from adaptive_vision_rl.verl.consistency import (
+    _markdown_report,
     _reference_actions,
     object_array,
     probability_difference,
@@ -111,3 +112,23 @@ class ConsistencyReportTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "outside"):
                 run_verification(args)
             self.assertFalse(checkpoint.exists())
+
+    def test_replay_report_identifies_saved_rollout_and_current_actor_computations(self):
+        focus = {"row": 1, "response_offset": 21, "token_id": 27, "probability": .25}
+        report = {
+            "status": "completed", "checkpoint": "/checkpoint", "forward_diagnostics": True,
+            "replay": {"source_report": "/original/report.json"},
+            "cases": [{"name": "decision", "errors": {}, "comparisons": {}, "forward_diagnostics": {
+                "all_captures_valid": True, "trace_file": "decision_forward_trace.json",
+                "focus_tokens": [focus],
+                "first_nonidentical_captured_stages": {"actor_training_repeat": None},
+                "phases": {"actor_training_repeat": {"reference_phase": "actor_training", "focus_probabilities": [focus]}},
+            }}],
+        }
+        text = _markdown_report(report)
+        self.assertIn("`rollout` 概率沿用原报告", text)
+        self.assertIn("actor 与 vllm_prefill 使用当前代码重算", text)
+        self.assertIn("row 1 / response 21 / ID 27", text)
+        self.assertIn("| actor_training_repeat | actor_training | 记录值完全相同 | 0.250000 |", text)
+        self.assertIn("重放时首次为 vLLM 固定 token 重算前", text)
+        self.assertIn("不代表已证明该模块是根因", text)

@@ -18,8 +18,9 @@ CUDA_VISIBLE_DEVICES=0 python -m scripts.verify_rollout_consistency
 LoRA 在线同步、trajectory collector 和图像处理流程；不启动训练循环或 WandB。
 它只加载 `.pt` 模型权重，不恢复优化器、不更新参数、不导出 adapter、不旋转 checkpoint。
 checkpoint 中无需存在 `adapter/` 或 `actor/lora_adapter/`，也无需额外复制完整模型或 checkpoint。
-加载后直接从 FSDP 展开的 LoRA 层读取 A/B 权重，避免未包装 PEFT 模型的 `state_dict()`
-返回扁平参数而漏掉 adapter；首次和后续在线同步、checkpoint 导出共用此收集器。
+加载后直接从 FSDP 展开的 LoRA 层读取 A/B 权重，避免新版 PEFT 使用模块路径筛选时，
+嵌套 FSDP 包装路径与权重字典路径不一致而漏掉 adapter；首次和后续在线同步、
+checkpoint 导出共用此收集器。
 
 默认从 `data/verl_agent/val.parquet` 取前 4 个样本，保留训练配置中的 1024 response token
 上限。每个样本分别检查单图决策首轮和固定工具裁剪后的双图第二轮；第二轮不是模型
@@ -95,3 +96,51 @@ actor 的重算不额外计算 entropy，不改变 logprob 算法；没有 backw
 若某个 GPU 阶段报错，先保留并提供对应 `.zip`，无需先反复调整配置。
 
 本地已验证报告计算、token 对齐、失败打包与 CPU 权重检查；完整 GPU 对照需要在服务器执行。
+
+## 固定异常 token 的后续诊断
+
+若已确认同步权重正确，但 batch / 去 padding 对照仍有明显差异，可以重放上一轮报告中的
+原始 response。将本次代码同步到服务器，在原 CUDA 环境运行：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -m scripts.verify_rollout_consistency \
+  --replay-report /root/autodl-tmp/outputs/rollout_consistency_step300_20261007_193610 \
+  --forward-diagnostics
+```
+
+仍使用默认 step 300 checkpoint。其他 checkpoint 需要显式传入 `--checkpoint`。
+`--replay-report` 可以指向报告目录或其中的 `report.json`；目录必须包含原来的
+`*_samples.json`。配置来自原报告的 `effective_config`，样本按原 sample ID 从 parquet
+重建，不允许同时改变样本范围、response 上限或使用 `--override`。模型/图像路径搬迁
+可使用 `--base-model`、`--data-root`，但内容应与原测试一致。原始 report 与 .pt 都不修改，
+输出另建带时间戳的目录及 `.zip`。
+
+重放会核对 prompt token、位置编码、图像尺寸/grid 和 LoRA 指纹；回答保持原样，
+因此能持续观察同一个异常 `<` token。**`rollout` 概率取自原报告，actor 和
+`vllm_prefill` 概率使用当前代码重算，本轮没有重新采样。**
+
+新增以下前向对照，覆盖单图、双图和两者交错的 batch：
+
+| 阶段 | 用途 |
+|---|---|
+| `actor_training_repeat` / `actor_training_after_controls` | 重复同一前向，并检查临时控制恢复后的结果 |
+| `actor_padded_batch` | 与 packed batch、padded single 对照，区分 batch 与去 padding 的影响 |
+| `actor_base_*` | 关闭 LoRA 后重复不同布局，判断差异是否依赖 LoRA；均使用温度 1 |
+| `actor_fp32_logprob` | 仅将最终 logprob 运算的 logits 转为 FP32 |
+| `actor_fp32_head_*` | 临时用 FP32 计算输出层矩阵乘法，其他层沿用原精度 |
+| `actor_no_reduced_bf16_*` | 临时禁止 BF16 GEMM 的 reduced-precision reduction |
+| `actor_precise_head_*` | 同时使用上述输出层与 GEMM 控制 |
+
+这些是定位用的临时控制，不修改参数存储或正式训练配置。FP32 输出层使用前向时
+已物化的权重转成 FP32，并不恢复已在 BF16 转换中丢失的信息。禁止 BF16 reduction
+仅影响采用该选项的 CUDA 内核；无改善不能排除所有数值问题。相关行为见
+[PyTorch 数值精度说明](https://docs.pytorch.org/docs/2.8/notes/numerical_accuracy.html)。
+
+每个场景新增 `*_forward_trace.json`，记录原报告中概率差最大的 4 个 token 的预测位置：
+语言层输入、每层输出、输出层输入及完整 logits，以及它们所在样本的视觉 merger /
+DeepStack 特征差。`REPORT.md` 同时给出这些 token 在不同控制下的概率。
+“最早出现变化的已记录阶段”只代表这些有限的记录点，不能直接当成根因定位。
+精度控制改善概率差时仍需结合激活差判断，不能仅凭改善就认定原实现错误。
+
+诊断过程不调用 backward / optimizer，也不写入 checkpoint 或 adapter。结束后提供
+新生成的 `.zip`，即可继续区分同步之外的前向差异。
