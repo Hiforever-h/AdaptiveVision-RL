@@ -22,7 +22,7 @@ def load_config(path: str, overrides: list[str]):
     return config
 
 
-def run_dtpo(config, *, probe_steps=None, probe_output=None):
+def run_dtpo(config, *, probe_steps=None, probe_output=None, probe_validation=False):
     from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 
     if not ray.is_initialized():
@@ -34,12 +34,13 @@ def run_dtpo(config, *, probe_steps=None, probe_output=None):
         )
         ray.init(**OmegaConf.to_container(ray_kwargs, resolve=True))
     runner = DTPOTaskRunner.remote()
-    ray.get(runner.run.remote(config, probe_steps=probe_steps, probe_output=probe_output))
+    ray.get(runner.run.remote(config, probe_steps=probe_steps, probe_output=probe_output,
+                              probe_validation=probe_validation))
 
 
 @ray.remote(num_cpus=1)
 class DTPOTaskRunner:
-    def run(self, config, *, probe_steps=None, probe_output=None):
+    def run(self, config, *, probe_steps=None, probe_output=None, probe_validation=False):
         from pprint import pprint
 
         from verl.single_controller.ray import RayWorkerGroup
@@ -189,8 +190,11 @@ class DTPOTaskRunner:
             trainer.fit()
         else:
             import json
-            from adaptive_vision_rl.verl.short_run import install_short_run
-            recorder, restore = install_short_run(trainer, steps=probe_steps, output=probe_output)
+            if probe_validation:
+                from adaptive_vision_rl.verl.validation_run import install_validation_run as install_probe
+            else:
+                from adaptive_vision_rl.verl.short_run import install_short_run as install_probe
+            recorder, restore = install_probe(trainer, steps=probe_steps, output=probe_output)
             try:
                 (Path(probe_output) / "effective_config.json").write_text(
                     json.dumps(OmegaConf.to_container(config, resolve=True), ensure_ascii=False, indent=2) + "\n")
@@ -212,11 +216,16 @@ def main():
     )
     parser.add_argument("--probe-steps", type=int, choices=[10], help="Fresh 10-step diagnostic; preserve the full scheduler horizon")
     parser.add_argument("--probe-output", type=Path, help="Local directory for per-step metrics and completion state")
+    parser.add_argument("--probe-validation", action="store_true",
+                        help="Validate the full fixed validation set before and after the 10-step probe")
     args, overrides = parser.parse_known_args()
     if (args.probe_steps is None) != (args.probe_output is None):
         parser.error("--probe-steps and --probe-output must be supplied together")
+    if args.probe_validation and args.probe_steps is None:
+        parser.error("--probe-validation requires --probe-steps and --probe-output")
     run_dtpo(load_config(args.config, overrides), probe_steps=args.probe_steps,
-             probe_output=str(args.probe_output.resolve()) if args.probe_output is not None else None)
+             probe_output=str(args.probe_output.resolve()) if args.probe_output is not None else None,
+             probe_validation=args.probe_validation)
 
 
 if __name__ == "__main__":

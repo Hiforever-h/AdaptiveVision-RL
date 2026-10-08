@@ -66,15 +66,20 @@ class ShortRunRecorder:
         self.persist()
 
 
-def install_short_run(trainer, *, steps, output, tracking_module=None):
+def install_short_run(trainer, *, steps, output, tracking_module=None,
+                      validation=False, recorder_class=ShortRunRecorder):
     """Install after init_workers so optimizer/warmup keep the full-run horizon."""
     config = trainer.config
     if steps != 10:
         raise ValueError("This diagnostic is limited to exactly 10 fresh training steps")
     if config.trainer.resume_mode != "disable" or config.trainer.resume_from_path is not None:
         raise ValueError("Short run must start fresh from SFT, with automatic resume disabled")
-    if (config.trainer.save_freq > 0 or config.trainer.test_freq > 0
-            or config.trainer.val_before_train or config.trainer.get("val_only", False)):
+    if validation:
+        if (config.trainer.save_freq > 0 or config.trainer.test_freq != steps
+                or not config.trainer.val_before_train or config.trainer.get("val_only", False)):
+            raise ValueError("Validation probe requires validation before training and at step 10, without checkpoints")
+    elif (config.trainer.save_freq > 0 or config.trainer.test_freq > 0
+          or config.trainer.val_before_train or config.trainer.get("val_only", False)):
         raise ValueError("Short run must disable checkpoint saving and validation")
     if (int(config.actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu) != 2
             or int(config.actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu) != 2):
@@ -82,7 +87,8 @@ def install_short_run(trainer, *, steps, output, tracking_module=None):
     horizon = int(config.actor_rollout_ref.actor.optim.total_training_steps)
     if horizon < steps or len(trainer.train_dataloader) < steps:
         raise ValueError("Original training schedule/dataloader contains fewer than 10 steps")
-    recorder = ShortRunRecorder(output, steps=steps, scheduler_horizon=horizon)
+    recorder = recorder_class(output, steps=steps, scheduler_horizon=horizon)
+    recorder.state["validation"] = validation
     optim = config.actor_rollout_ref.actor.optim
     warmup = int(optim.get("lr_warmup_steps", -1))
     recorder.state["warmup_steps"] = warmup if warmup >= 0 else int(horizon * float(optim.get("lr_warmup_steps_ratio", 0)))

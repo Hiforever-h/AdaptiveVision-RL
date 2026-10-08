@@ -252,6 +252,30 @@ Smoke test 需要重点确认：
 
 ## 正式训练
 
+正式训练前如需比较真实更新前后的验证结果，可单独运行：
+
+```bash
+python -m scripts.run_dtpo_val10_probe
+```
+
+该脚本从当前合并 SFT 基座新建 LoRA，不恢复历史 checkpoint；先完整验证，
+再更新 10 个训练 step，最后用相同验证集和贪心设置完整验证一次。旧概率和
+更新 micro-batch 都固定为 2；沿用正式训练的学习率、warmup 和完整 scheduler
+计划，只在 Worker 初始化后把训练循环停止位置改为第 10 步。不保存 checkpoint，
+不改写 SFT 模型目录。默认仅使用 console，不需要 WandB 登录。
+
+结果写入 `/root/autodl-tmp/outputs/dtpo_val10_时间戳/`，结束时自动打包同名 zip。
+`REPORT.md` 汇总两次验证指标、差值和逐题输出变化；`train/` 保留两次验证的
+完整逐题输出、逐步训练指标和实际配置。即使进程异常退出，也会打包已有结果，
+并在 `run.json` 中记录失败。10 步后验证指标不一定改变，需要同时查看学习率、
+梯度范数和逐题输出。
+
+可用 `--output` 指定新输出目录，用 `--base-model` / `--data-root` 修改输入路径，
+用 `--config` 指定另一份正式训练配置。其他正式训练参数按 `key=value` 传入；
+恢复模式、验证时点、micro-batch 和 checkpoint 保存等本次检查的固定设置会覆盖
+同名参数。请保留正式训练的 `total_training_steps` / `total_epochs` 计划，
+不要为了运行 10 步把 scheduler 计划也改成 10 步。
+
 ```bash
 bash scripts/run_dtpo_lora.sh
 ```
