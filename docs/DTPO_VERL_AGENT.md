@@ -256,6 +256,23 @@ Smoke test 需要重点确认：
 bash scripts/run_dtpo_lora.sh
 ```
 
+默认 `resume_mode=auto` 会恢复同一输出目录中已有的 checkpoint。从 SFT 基座
+重新开始时，显式关闭恢复，并为 checkpoint、rollout 和 WandB 使用新的 run 名称：
+
+```bash
+bash scripts/run_dtpo_lora.sh \
+  trainer.resume_mode=disable \
+  trainer.resume_from_path=null \
+  trainer.experiment_name=qwen3vl_4b_dtpo_run3 \
+  trainer.default_local_dir=/root/autodl-tmp/checkpoints/qwen3vl_4b_dtpo_run3 \
+  trainer.rollout_data_dir=/root/autodl-tmp/outputs/rollouts/qwen3vl_4b_dtpo_run3
+```
+
+选用尚未使用的新目录；中断后需要续训时，保留该目录并改回
+`trainer.resume_mode=auto`。正式入口要求旧概率重算与 actor 更新的 micro-batch
+一致；旧字段 `ppo_micro_batch_size` / `log_prob_micro_batch_size` 若与对应
+`*_per_gpu` 字段冲突，会在模型加载前报错，避免历史命令行参数重新引入批量差异。
+
 默认每 20 个训练 step 保存一次可恢复训练的 checkpoint，并只保留最近 1 个：
 
 ```yaml

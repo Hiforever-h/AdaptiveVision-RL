@@ -54,6 +54,7 @@ class DTPOTaskRunner:
         from adaptive_vision_rl.environment import make_adaptive_vision_envs
         from adaptive_vision_rl.thinking_template import configure_thinking_tokenizer
         from adaptive_vision_rl.verl.collector import AdaptiveVisionTrajectoryCollector
+        from adaptive_vision_rl.verl.config_validation import validate_log_prob_batch_alignment
         from adaptive_vision_rl.verl.checkpoints import install_checkpoint_retention
         from adaptive_vision_rl.verl.dtpo import install_driver_hooks
         from adaptive_vision_rl.verl.reward_manager import AdaptiveVisionRewardManager
@@ -94,6 +95,7 @@ class DTPOTaskRunner:
             or actor.ppo_mini_batch_size % log_prob_micro_batch_size
         ):
             raise ValueError("rollout log-prob micro-batch size must divide ppo_mini_batch_size")
+        validate_log_prob_batch_alignment(actor, config.actor_rollout_ref.rollout)
 
         local_path = copy_to_local(
             config.actor_rollout_ref.model.path,
